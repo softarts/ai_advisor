@@ -1,0 +1,176 @@
+# AI Advisor
+
+IBKR PortfolioAnalyst 自开户报告导入、dashboard 和 LangGraph CLI 助手。
+
+## 快速开始
+
+```powershell
+python dashboard.py --ingest data/report_since_inception.plain
+python -m advisor
+```
+
+在项目根目录复制 `.env.example` 为 `.env` 并配置 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`。`APP_TIMEZONE` 默认为 `Asia/Singapore`。每轮模型请求动态传递本地日期/时间及时区，并单独传递报告数据截止日。CLI 输入 `/import-report` 可交互提供路径；直接回车采用 `data/report_since_inception.plain`。成功或重复导入后会刷新根目录 `dashboard.html`。
+
+CLI 命令：`/help`、`/import-report [路径]`、`/history`、`/clear`、`/remember key=value`、`/recall`、`/exit`。短期对话 checkpoint 和长期记忆均为内存实现，进程结束后清空。
+
+## 数据模型、适配与持久化
+
+每次输入报告先由来源 adapter 解析。PA section 名及表头只由 `pa_analytics.loader` 识别；`adapt_portfolio()` 等函数把来源字段映射为规范化观测。业务工具通过规范模型与数据层访问，不直接依赖 PA section 或源表头。
+
+SQLite 数据库默认为 `data/pa.db`，采用多表数仓（Warehouse）分层架构：
+
+- `snapshots`：每次完整报告快照的元数据与解析后的 payload JSON，按源文件 SHA-256 去重。完全相同的文件再次导入返回 duplicate；不同内容的报告另存快照，保留旧版。当前报告按报告截止日期选择最新快照。
+- `table_portfolio`：规范化月末资产记录，字段包括 `snapshot_id`、`account_id`、`term_month`、`value`、`currency`。月份范围查询从该规范表检索。
+- `table_monthly_returns`：规范化月度收益率与基准收益，字段包括 `term_month`、`account_return`、`bm1_return`、`bm2_return`、`bm3_return`。
+- `table_flows`：出入金资金流记录，字段包括 `flow_date`、`flow_type`、`description`、`amount`。
+- `table_symbol_pnl`：合约级累计盈亏明细，字段包括 `symbol`、`instrument`、`avg_weight`、`ret_pct`、`contribution`、`unrealized`、`realized`、`total_pnl`、`open_status`，支持毫秒级排名前 N 赢家与输家查询。
+- `table_open_positions`：最新报告持仓记录，字段包括 `as_of_date`、`instrument`、`currency`、`symbol`、`quantity`、`close_price`、`value`、`cost_basis`、`unrealized`。
+- `data/raw/`：原始报告归档，文件名带账户、报告截止日和哈希前缀。
+
+Store 初始化时会自动执行 `_backfill()`，确保现有已导入快照无缝升级并填入所有分表。Store 向上提供结构化 Data API（如 `get_portfolio_series()`、`get_monthly_returns_data()`、`get_top_contributors()`、`get_flows_data()` 等）。
+
+`get_portfolio_detail` 与其它 9 个工具统一通过 `pa_analytics.registry` 声明并经 `advisor.tools.create_tools(store)` 注册。LLM 不能执行任意 SQL；tool 函数统一经 Store 数据层和指标计算层查询规范数据。参数使用明确的区间与标准窗口标签，消除特例硬编码。
+
+## Dashboard
+
+dashboard 使用同一套 PA 指标计算，提供 YTD、1M、3M、6M、1Y、3Y、5Y、自开户区间；展示资产曲线、账户对 SPXTR/EFA/VT 的累计收益曲线、配置变化和收益归因。数据月度精度、部分月份和归因估算警告见看板的数据说明。
+
+## Agent、Graph、记忆与 LLM
+
+```mermaid
+flowchart LR
+    U[CLI 用户输入] --> G[LangGraph]
+    G --> L[LLM HTTP chat completions]
+    L -->|文本回答| E[CLI 输出]
+    L -->|tool call| T[注册工具]
+    T --> D[规范数据层 / SQLite]
+    D --> T --> G
+    G -. checkpoint .-> S[短期对话记忆 MemorySaver]
+    G -. store .-> M[长期记忆 InMemoryStore]
+```
+
+Graph 由 `llm` 与 `tools` 两个节点组成：LLM 请求携带注册工具的 JSON Schema；如返回 tool call，Graph 执行对应 Python 函数，把结果作为 tool message 回传 LLM，再取得最终回答。`Tool(name, description, params_schema, fn)` 将 schema 和本地函数绑定，新增工具应调用数据层 API。
+
+LangGraph `MemorySaver` 按 thread 保存短期消息；`InMemoryStore` 按 user namespace 保存 `/remember` 明确写入的键值，并在后续模型请求中提供。两者当前均为进程内存，不跨 CLI 重启持久化。
+
+LLM 通过 `httpx` 调用 OpenAI-compatible `/chat/completions`。配置从环境变量或项目根 `.env` 读取。每个运行实例在 `logs/advisor_<id>.jsonl` 记录用户输入、HTTP 请求/响应、tool 调用/结果、记忆操作和最终回答；Authorization header 不写入日志。日志含账户问题与返回数据，应按本地敏感文件管理。
+
+## Agent 工具清单、调用链与标准示例
+
+以下 10 个工具当前已注册到 Agent。窗口参数使用 `YTD`、`1M`、`3M`、`6M`、`1Y`、`3Y`、`5Y`、`ALL`；明细工具使用含首尾的 `YYYY-MM` 月份范围。`get_top_contributors.n` 允许 1–20。
+
+| Tool | 说明 | 参数 | 示例问题 |
+|---|---|---|---|
+| `get_capabilities` | 报告覆盖范围、可回答/不可回答主题、数据约束、导入校验和快照列表 | 无 | “这份报告能回答哪些问题？有什么限制？” |
+| `get_portfolio_detail` | 从规范化 `table_portfolio` 查询月份范围内的月末资产值 | `start_month`, `end_month` | “列出 2026 年 9 月到 10 月的月末资产。” |
+| `get_window_summary` | 期初/期末资产、资金流、区间盈亏、月度链接 TWR 和三项基准收益 | `window`，默认 `YTD` | “过去一年资产变化多少？比三个基准如何？” |
+| `get_monthly_returns` | 返回窗口内各月账户收益率、最高/最低收益月份和同期基准月收益 | `window`，默认 `YTD` | “过去三年哪个月份收益率最高？” |
+| `get_attribution` | 区间资产类别归因及每项质量标记、口径警告 | `window`，默认 `YTD` | “今年收益主要来自哪些类别？” |
+| `get_yearly_table` | 每个自然年的期初/期末资产、资金流、盈亏、TWR 和归因 | 无 | “哪一年收益最好、哪一年最差？” |
+| `get_cash_interest` | 区间利息、其他费用、平均月末现金、近似隐含年化利率 | `window`，默认 `YTD` | “今年利息、费用和现金隐含年化收益率是多少？” |
+| `get_top_contributors` | 按合约列出累计已实现加未实现盈亏赢家/输家及品种汇总；不能按时间切片 | `n`，默认 10，范围 1–20 | “自开户以来盈亏最高和最低的合约是什么？” |
+| `get_risk_measures` | 报告提供的月度风险指标与基准对比 | 无 | “最大回撤、夏普和恢复期是多少？” |
+| `get_open_positions` | 当前持仓、资产类别市值权重和当前按币种现金 | 无 | “现在的持仓配置和 SGD/USD 现金分别是多少？” |
+
+### 通用调用链
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant G as LangGraph Agent
+    participant L as LLM API
+    participant T as Tool 校验/执行
+    participant D as Store / metrics / SQLite
+    U->>G: 问题 + 本轮对话
+    G->>L: system context、消息、10 个工具 schema
+    L-->>G: tool call（名称与 JSON 参数）
+    G->>T: 校验必填项、类型、枚举、月份格式与数量边界
+    T->>D: 执行规范数据查询或确定性指标计算
+    D-->>T: 带来源、口径、质量和警告的结果
+    T-->>G: tool message（或结构化错误）
+    G->>L: 原对话 + tool 结果
+    L-->>G: 面向用户的回答
+    G-->>U: 最终回答
+```
+
+模型不得自行查询 SQL 或代替工具做精确算术。对报告不支持的问题，Agent 应调用 `get_capabilities`，说明缺少的数据并拒绝给出无法验证的结论。工具参数错误返回包含 `status=error` 和错误码的结果，不应使 Graph 崩溃。
+
+### 示例问题与标准答案
+
+以下数值是当前快照（账户 `U9628699`，PA 报告截止 2026-10-09）的回归参考值；重新导入新快照后，标准数值会随数据变化。金额为 SGD，数字四舍五入展示。
+
+1. **“过去三年哪个月份收益率最高？”**
+
+   调用链：`用户问题 → get_monthly_returns(window="3Y") → monthly_return_extremes / 报告月度收益率与基准数据 → LLM 回答`。该窗口由统一的窗口解析器确定，工具返回完整月度序列及排序结果；最后一个报告月可能是部分月。
+
+   标准答案：2023-11 至 2026-10 的 36 个报告月份中，最高为 2025-03，账户月度 TWR +4.49%。同期 SPXTR −5.63%、EFA +0.18%、VT −3.52%。窗口也包含 2026-10，但该月截至 2026-10-09，属于部分月；最低月份为 2025-05，账户月度 TWR −4.02%。
+
+2. **“列出 2026 年 9 月到 10 月的月末资产。”**
+
+   调用链：`用户问题 → get_portfolio_detail(start_month="2026-09", end_month="2026-10") → Store 查询 table_portfolio → LLM 整理序列`。
+
+   标准答案：2026-09 月末资产为 707,216.54；2026-10 报告截至 10 月 9 日，资产为 713,223.18，该点是部分月，不是完整月末。
+
+3. **“过去一年资产变化多少？和三个基准比如何？”**
+
+   调用链：`用户问题 → get_window_summary(window="1Y") → window_summary / 月度收益链接与资金流计算 → LLM 回答`。区间内 12 个收益月份为 2025-11 至 2026-10；资产 opening 取区间前的 2025-10-31。
+
+   标准答案：期初 532,216.57（2025-10-31），期末 713,223.18（2026-10-09），资产变化 +181,006.61；净转入 +77,000.42，区间投资盈亏 +104,006.19，月度链接 TWR 为 19.35%。基准同期收益：SPXTR 15.50%、EFA 13.17%、VT 15.57%；账户分别领先约 3.86、6.18、3.78 个百分点。PA 官方按日滚动 1 年参考值为 21.08%，起点口径不同，需单独标注。
+
+4. **“今年收益如何，比标普好吗？”**
+
+   调用链：`用户问题 → get_window_summary(window="YTD") → 同期账户/基准月度收益链接 → LLM 回答`。
+
+   标准答案：截至报告日，2026 YTD 月度链接 TWR 为 16.73%；SPXTR 为 15.14%，账户领先约 1.58 个百分点。报告只到 2026-10-09，10 月是部分月。
+
+5. **“今年的收益主要来自哪些资产类别？”**
+
+   调用链：`用户问题 → get_attribution(window="YTD") → window_attribution → LLM 总结各桶并附质量/警告`。
+
+   标准答案：YTD 净值口径盈亏为 +92,088.92。归因估算：股票/ETF +4,669.06、股票期权 +3,898.15；期货/期货期权/外汇合并剩余项 +77,660.39；精确利息 +5,930.28，其他费用 −68.96。股票/ETF 与股票期权是估算；期货、期货期权和外汇不能可靠拆分（K2–K5）。股息 97.80 仅作备注，归属未验证。
+
+6. **“哪一年收益最好、哪一年最差？”**
+
+   调用链：`用户问题 → get_yearly_table → yearly_table → LLM 按自然年 TWR 排序`。
+
+   标准答案：按自然年 TWR，最好为 2023 年 +31.88%；最差为 2018 年 −28.16%。按 SGD 盈亏金额，2020 年最低，为 −406,559.14。回答“最好/最差”时要说明按收益率还是金额排序。
+
+7. **“今年现金利息和隐含收益率是多少？”**
+
+   调用链：`用户问题 → get_cash_interest(window="YTD") → 现金利息与月末现金均值计算 → LLM 回答并注明近似口径`。
+
+   标准答案：截至 2026-10-09，YTD 利息 +5,930.28，其他费用 −68.96，平均月末现金约 592,820.54 SGD，隐含年化收益率约 1.29%。现金均值是按月末、跨 SGD/USD 换算后的近似值，利息也可能包含借款利息。
+
+8. **“历史上盈亏最大的合约是什么？”**
+
+   调用链：`用户问题 → get_top_contributors(n=3) → top_contributors → LLM 引用赢家/输家并说明口径`。
+
+   标准答案：合约级累计盈亏赢家首位 ESM5，+107,932.36 SGD；输家首位 SPY，−53,431.09 SGD。口径是累计已实现加未实现盈亏，不可按时间切片；总和与 MTM 不同，标的/合约没有进一步合并（K10）。
+
+9. **“最大回撤是多少，恢复情况如何？”**
+
+   调用链：`用户问题 → get_risk_measures → PA 月度风险指标 → LLM 引用原始指标并附月度限制`。
+
+   标准答案：PA 风险区块给出的最大回撤为 65.20%，峰值至谷底为 2018-01 至 2020-03，恢复期字段为 75 个月。数据只有月度精度，会低估月内回撤；不能把该指标解释为日内最大回撤。
+
+10. **“目前 SGD 和 USD 现金分别是多少？资产配置如何？”**
+
+   调用链：`用户问题 → get_open_positions → open_positions → LLM 区分币种现金与多空权重分母`。
+
+   标准答案：2026-10-09 持仓报告列出 SGD 现金 193,979.95；USD 现金 365,251.95，按报告汇率 1.2807 折合 467,778.17 SGD。资产类别多头权重中 Cash 约 92.40%、Equities 约 7.59%。空头侧 Equities 约 97.58% 是以总空头市值为分母，不能说成账户净值的 97.58%。这些是市值口径，不代表风险敞口（K9）；报告也没有证券/期货分段现金或历史币种现金。
+
+11. **“这份报告能否告诉我账户杠杆是多少？”**
+
+    调用链：`用户问题 → get_capabilities → NOT_ANSWERABLE / K7 → LLM 说明限制并拒答数值`。
+
+    标准答案：不能。PA 报告没有占用保证金和剩余流动性数据，无法计算杠杆；需要导入含保证金字段的数据后才能评估。不能根据现金占比推断杠杆或风险低。
+
+## Smoke check
+
+```powershell
+python -c "from pa_analytics import Store; from advisor.tools import create_tools; s=Store('data/pa.db'); print(f'已注册工具 ({len(create_tools(s))} 个): {[t.name for t in create_tools(s)]}')"
+python -c "from pa_analytics import Store; from advisor.tools import portfolio_detail_tool; s=Store('data/pa.db'); print(portfolio_detail_tool(s).fn(start_month='2026-01', end_month='2026-10'))"
+python dashboard.py
+```
+
+前两条检查已导入数据能经规范数据层与注册工具返回记录（兼容原有 `portfolio_detail_tool` 接口）；第三条检查 dashboard 可由当前快照正常生成。不包含 LLM 网络调用。

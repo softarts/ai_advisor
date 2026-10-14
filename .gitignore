@@ -1,0 +1,21 @@
+enterpriseag-bench_all_documents/
+*.pyc
+*.zip
+*.npy
+env.bat
+env.sh
+.DS_Store
+*.npy
+__MACOSX/
+generated
+.vscode/
+_tmp*
+.idea/
+*.db
+llmclient.py
+*.sh
+.venv-py314/
+
+# Runtime log files
+logs/
+data/
