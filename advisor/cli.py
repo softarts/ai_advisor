@@ -2,8 +2,14 @@ import argparse
 import json
 import logging
 import os
+import time
 import uuid
 from pathlib import Path
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 
 from pa_analytics import Store
 from dashboard import build_payload, HTML
@@ -18,6 +24,36 @@ def _load_env():
             line=line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k,v=line.split("=",1); os.environ.setdefault(k.strip(),v.strip().strip('"\''))
+
+
+COMMANDS = ["/import-report", "/history", "/clear", "/remember", "/recall", "/help", "/exit", "/quit"]
+
+
+class CommandCompleter(Completer):
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text:
+            return
+        for cmd in COMMANDS:
+            if cmd.startswith(text):
+                yield Completion(cmd, start_position=-len(text))
+
+
+def _make_key_bindings():
+    kb = KeyBindings()
+    state = {"last_ctrl_c": 0.0}
+
+    @kb.add("c-c")
+    def _(event):
+        now = time.monotonic()
+        if now - state["last_ctrl_c"] < 1.0:
+            event.app.exit(exception=EOFError)
+        else:
+            state["last_ctrl_c"] = now
+            event.app.output.write("\n再按一次 Ctrl-C 退出（或输入 /exit）\n")
+            event.app.current_buffer.reset()
+
+    return kb
 
 
 def main():
@@ -40,9 +76,16 @@ def main():
                         data_as_of=lambda: store.current().period_end)
     else: advisor=None
     thread_id=uuid.uuid4().hex
+    history_path = Path("logs") / ".advisor_history"
+    session = PromptSession(
+        history=FileHistory(str(history_path)),
+        completer=CommandCompleter(),
+        complete_while_typing=True,
+        key_bindings=_make_key_bindings(),
+    )
     print(f"AI Advisor · 日志 {log_path} · 输入 /help 查看命令")
     while True:
-        try: line=input("你> ").strip()
+        try: line=session.prompt("你> ").strip()
         except (EOFError,KeyboardInterrupt): print(); break
         if not line: continue
         if line in ("/exit","/quit"): break

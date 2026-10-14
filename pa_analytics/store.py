@@ -57,6 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_open_positions ON table_open_positions(snapshot_i
 class Store:
     def __init__(self, db_path: str, raw_dir: str | None = None):
         self.raw_dir = Path(raw_dir) if raw_dir else None
+        db_path = Path(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
