@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from pathlib import Path
 import time
 from datetime import datetime
 from typing import TypedDict, Annotated
@@ -46,10 +47,14 @@ class Advisor:
         time_context = (f"\n本轮当前日期时间：{now.isoformat(timespec='seconds')}（时区 {self.timezone_name}）。"
                         f"账户报告数据截止日：{as_of or '未知'}。当前日期与数据截止日不同，不能假设报告已更新到今天。")
         system = ("你是投资组合数据助手。账户相关问题必须用工具取得数据，不能自行计算工具可计算的数字。"
-                  "月度收益率查询或排序使用 get_monthly_returns；资产价值区间查询使用 get_portfolio_detail。"
+                  "月度收益率查询或排序使用 get_monthly_returns；资产价值区间查询使用 get_portfolio_detail；"
+                  "用户询问“为什么某月收益高/低”或单月收益原因必须先调用 get_month_detail（参数为显式 YYYY-MM），不得用其他窗口（如 3Y、YTD 等）的宏观归因推断。"
                   "涉及报告不支持或缺数据的问题，先查询 get_capabilities，再说明缺少什么并拒答不可验证的结论。"
                   "使用工具返回的区间、币种、质量、warnings 和口径说明；自开户盈亏需结合资金流解读。"
                   "相对日期以本轮当前日期和时区为准，报告数据截止日仅表示数据覆盖范围。") + time_context
+        policy_path = Path(__file__).resolve().parent.parent / "prompts" / "why_month_policy.md"
+        if policy_path.exists():
+            system += "\n\n" + policy_path.read_text(encoding="utf-8")
         if memory_text: system += "\n用户长期记忆：\n" + memory_text
         messages = [{"role": "system", "content": system}]
         for m in state["messages"]:

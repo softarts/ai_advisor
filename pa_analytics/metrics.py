@@ -14,6 +14,7 @@ _N = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12, "3Y": 36, "5Y": 60}
 _OFFICIAL = {"YTD": "YTD", "1Y": "1 Year", "3Y": "3 Year", "5Y": "5 Year", "ALL": "Since Inception"}
 VALIDATED_FROM = "2025-01"   # 归因估算只与 2025 年报、2026 Flex 对照验证过；更早的月份未验证
 MAX_CONTRIBUTORS = 20
+CONSISTENCY_THRESHOLD_PP = 1.0
 
 
 def _d(s):
@@ -264,7 +265,7 @@ ANSWERABLE = ["区间收益与 TWR", "与 SPXTR/EFA/VT 的比较", "资产配置
               "利息、费用与现金拖累", "按合约/品种的累计盈亏", "出入金历史"]
 WITH_CAVEATS = ["按资产类别归因（见 K2~K5）"]
 NOT_ANSWERABLE = ["杠杆与保证金", "存入 SGD 能否释放期货账户的 USD", "证券/期货分段的现金分布", "卖出期权持仓多久、delta 退出点",
-                  "月度成交笔数与交易频率", "每日净值与月内回撤", "名义风险敞口（需另行设计）"]
+                  "月度成交笔数与交易频率（无逐笔成交时间，且不得用到期月份代替，见 K8）", "每日净值与月内回撤", "名义风险敞口（需另行设计）"]
 
 
 def get_capabilities(rep, snapshots: list | None = None) -> dict:
@@ -274,3 +275,247 @@ def get_capabilities(rep, snapshots: list | None = None) -> dict:
             "windows": {w: ("ok" if (w in ("ALL", "YTD") or len(months) >= _N[w]) else "insufficient") for w in WINDOWS},
             "answerable": ANSWERABLE, "answerable_with_caveats": WITH_CAVEATS, "not_answerable": NOT_ANSWERABLE,
             "constraints": CONSTRAINTS, "import_checks": rep.checks, "snapshots": snapshots or []}
+
+
+def month_detail(rep, month: str) -> dict:
+    """Return comprehensive single-month analysis with deterministic boundary checks and warnings."""
+    import re
+    if not isinstance(month, str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        return {
+            "status": "error",
+            "error": {"code": "INVALID_MONTH", "message": "月份格式错误，必须为 YYYY-MM"},
+            "value": None,
+            "warnings": ["参数 month 格式无效，必须为 YYYY-MM"]
+        }
+
+    months = _months(rep)
+    if month not in months:
+        min_m, max_m = months[0], months[-1]
+        return {
+            "status": "error",
+            "error": {
+                "code": "MONTH_OUT_OF_RANGE",
+                "message": f"月份 {month} 超出报告可用范围（{min_m} 至 {max_m}）",
+                "details": {"available_range": [min_m, max_m], "min_month": min_m, "max_month": max_m}
+            },
+            "value": None,
+            "warnings": [f"月份超出可用范围：{min_m} ~ {max_m}"]
+        }
+
+    is_partial = (month == months[-1])
+    prev_m = _prev(rep, month)
+    opening_date = _month_end(rep, prev_m).isoformat() if prev_m else _d(rep.period_start).isoformat()
+    closing_date = _d(rep.period_end).isoformat() if is_partial else _month_end(rep, month).isoformat()
+    s_date, e_date = _d(opening_date), _d(closing_date)
+
+    navs = {r["month"]: r for r in rep.nav_monthly}
+    v0 = navs[prev_m]["nav"] if prev_m else 0.0
+    v1 = navs[month]["nav"]
+    nav_change = v1 - v0
+
+    fl = [f for f in rep.flows if s_date < _d(f["date"]) <= e_date]
+    dep = sum(f["amount"] for f in fl if f["amount"] > 0)
+    wd = sum(f["amount"] for f in fl if f["amount"] < 0)
+    net_flow = dep + wd
+    profit_sgd = nav_change - net_flow
+    flow_items = [{"date": f["date"], "type": f.get("type"), "description": f.get("description"), "amount": f["amount"]} for f in fl]
+
+    rets = {r["month"]: r for r in rep.returns_monthly}
+    m_ret = rets.get(month, {})
+    twr_pct = m_ret.get("account")
+    bms = {rep.benchmarks[i]: m_ret.get(f"bm{i+1}") for i in range(len(rep.benchmarks))}
+    spxtr = bms.get("SPXTR")
+    excess_vs_spxtr = (twr_pct - spxtr) if (twr_pct is not None and spxtr is not None) else None
+
+    complete_months = months[:-1]
+    sorted_twrs = sorted([(m, rets[m]["account"]) for m in complete_months if rets.get(m, {}).get("account") is not None], key=lambda x: x[1], reverse=True)
+    if month in complete_months:
+        rank_idx = next(i + 1 for i, (m, _) in enumerate(sorted_twrs) if m == month)
+        rank_info = {"rank": rank_idx, "of": len(sorted_twrs)}
+    else:
+        rank_info = {"rank": None, "of": len(sorted_twrs), "note": "部分月不参与完整月排名"}
+
+    cur_nav = navs[month]
+    holdings_month_end = {
+        "etfs": cur_nav.get("etfs") or 0.0,
+        "stocks": cur_nav.get("stocks") or 0.0,
+        "options": cur_nav.get("options") or 0.0,
+        "futures_options": cur_nav.get("futures_options") or 0.0,
+        "cash": cur_nav.get("cash") or 0.0,
+        "nav": cur_nav.get("nav") or 0.0,
+    }
+
+    c_map = {r["month"]: r for r in rep.contrib_monthly}
+    c_row = c_map.get(month, {})
+    c_pp = {
+        "etfs": c_row.get("etfs", 0.0),
+        "stocks": c_row.get("stocks", 0.0),
+        "options": c_row.get("options", 0.0),
+        "futures": c_row.get("futures", 0.0),
+        "futures_options": c_row.get("futures_options", 0.0),
+        "future_style_options": c_row.get("fs_options", 0.0),
+        "cash": c_row.get("cash", 0.0),
+    }
+    sum_pp = sum(c_pp.values())
+    twr_gap_pp = sum_pp - (twr_pct or 0.0)
+    consistency = "ok" if abs(twr_gap_pp) <= CONSISTENCY_THRESHOLD_PP else "inconsistent"
+
+    quality = "estimate" if month >= VALIDATED_FROM else "unverified"
+    if consistency == "ok" and abs(sum_pp) >= 0.05:
+        composition_unavailable_reason = None
+        k_factor = profit_sgd / sum_pp
+        stocks_etf_pp = c_pp["etfs"] + c_pp["stocks"]
+        options_pp = c_pp["options"]
+        derivs_pp = c_pp["futures"] + c_pp["futures_options"] + c_pp["future_style_options"]
+        cash_pp = c_pp["cash"]
+
+        comp_items = [
+            {
+                "category": "stocks_etf",
+                "label": "股票/ETF",
+                "pp": stocks_etf_pp,
+                "share_pct": (stocks_etf_pp / sum_pp) * 100,
+                "sgd_estimate": stocks_etf_pp * k_factor,
+                "quality": quality,
+            },
+            {
+                "category": "stock_options",
+                "label": "股票期权",
+                "pp": options_pp,
+                "share_pct": (options_pp / sum_pp) * 100,
+                "sgd_estimate": options_pp * k_factor,
+                "quality": quality,
+            },
+            {
+                "category": "derivatives_merged",
+                "label": "期货/期货期权/未来风格期权（合并）",
+                "pp": derivs_pp,
+                "share_pct": (derivs_pp / sum_pp) * 100,
+                "sgd_estimate": derivs_pp * k_factor,
+                "quality": quality,
+                "note": "行权交叉影响导致期货与期货期权不可单拆，默认合并展示（见 K3）",
+            },
+            {
+                "category": "cash_category",
+                "label": "现金类",
+                "pp": cash_pp,
+                "share_pct": (cash_pp / sum_pp) * 100,
+                "sgd_estimate": cash_pp * k_factor,
+                "quality": quality,
+            },
+        ]
+        interest_exact = _sum_in(rep.interest, s_date, e_date)
+        fees_exact = _sum_in(rep.fees, s_date, e_date)
+        cash_sgd_est = cash_pp * k_factor
+        unexplained = cash_sgd_est - interest_exact - fees_exact
+        cash_category = {
+            "pp": cash_pp,
+            "sgd_estimate": cash_sgd_est,
+            "interest_exact": interest_exact,
+            "fees_exact": fees_exact,
+            "unexplained_sgd_estimate": unexplained,
+            "note": "现金类含利息、其他费用、外汇折算及未明确归类部分，未解释金额不可断言为利息、费用或外汇（见 K13）。",
+        }
+    else:
+        comp_items = None
+        cash_category = None
+        if consistency != "ok":
+            composition_unavailable_reason = (
+                f"各品种贡献之和（{sum_pp:.2f}%）与月度 TWR（{twr_pct:.2f}%）相差 {twr_gap_pp:+.2f} 个百分点，"
+                f"超出允许门禁（±{CONSISTENCY_THRESHOLD_PP} 个百分点），品种拆分不自洽，不提供品种拆分。"
+            )
+        else:
+            composition_unavailable_reason = (
+                f"各品种贡献之和（{sum_pp:.2f}%）接近 0，无法按比例分摊盈亏。"
+            )
+
+    div_amount = _sum_in(rep.dividends, s_date, e_date)
+    dividends_memo = {
+        "amount": div_amount,
+        "currency": rep.base_ccy,
+        "note": "股息明细精确，但 PA 未指明计入哪一项贡献，仅作备注，不单独扣减（见 K4）。",
+    }
+
+    can_say = [
+        f"本月（{month}）TWR 收益率（{twr_pct:+.2f}%）、同月基准表现及在 110 个完整月中的历史排名",
+        "净值变动、当月出入金流水与精确投资盈亏金额（入金不计入收益）",
+        "各类资产对当月收益的贡献占比（PA 口径，属于笼统类别占比）",
+        f"利息与其它费用的当月精确发生金额",
+    ]
+    cannot_say = [
+        "具体是哪笔交易、哪个合约、什么方向、什么时间拉高了收益（PA 不含逐笔成交时间，见 K8）",
+        "期货与期货期权各自独立的收益贡献（因行权搬家互相关联，必须合并展示，见 K3）",
+        "现金类中未解释部分的来源（不得断言为美元升值、利息或外汇，见 K13）",
+        "杠杆倍数、占用保证金、剩余流动性或名义风险敞口（无相关数据，见 K7、K9）",
+    ]
+
+    if is_partial:
+        can_say.append(f"该月份为截至 {closing_date} 的部分月数据")
+        cannot_say.append(f"不得断言为完整全月表现（数据仅截至 {closing_date}）")
+    if consistency == "inconsistent":
+        cannot_say.append(f"本月贡献之和与 TWR 差距超出阈值（差 {twr_gap_pp:+.2f} 个百分点），严禁引用任何品种拆分与估算（见 K3）")
+    if quality == "unverified":
+        cannot_say.append(f"本月处于 {VALIDATED_FROM} 验证起点之前，归因估算未经验证，仅供参考（见 K5）")
+
+    caveats = ["K1", "K2", "K3", "K4", "K9", "K13", "K14"]
+    if quality == "unverified":
+        caveats.append("K5")
+
+    warnings = []
+    if is_partial:
+        warnings.append(f"{month} 截至 {closing_date}，是部分月。")
+    if consistency != "ok":
+        warnings.append(f"{month} 品种贡献之和（{sum_pp:.2f}%）与 TWR（{twr_pct:.2f}%）相差 {twr_gap_pp:+.2f} 个百分点，自洽门禁未通过，不提供品种拆分。")
+    if quality == "unverified":
+        warnings.append(f"{month} 处于 {VALIDATED_FROM} 之前，归因估算未经验证。")
+
+    res = {
+        "status": "ok",
+        "month": month,
+        "is_partial": is_partial,
+        "opening_date": opening_date,
+        "closing_date": closing_date,
+        "return": {
+            "twr_pct": twr_pct,
+            "benchmarks_pct": bms,
+            "excess_vs_spxtr_pct": excess_vs_spxtr,
+            "rank": rank_info,
+        },
+        "nav": {
+            "opening": v0,
+            "closing": v1,
+            "change": nav_change,
+        },
+        "flows": {
+            "items": flow_items,
+            "deposits": dep,
+            "withdrawals": wd,
+            "net": net_flow,
+        },
+        "profit_sgd": profit_sgd,
+        "holdings_month_end": holdings_month_end,
+        "contribution_pp": {
+            **c_pp,
+            "sum": sum_pp,
+            "twr_gap_pp": twr_gap_pp,
+            "consistency": consistency,
+        },
+        "composition": comp_items,
+        "composition_unavailable_reason": composition_unavailable_reason,
+        "cash_category": cash_category,
+        "dividends_memo": dividends_memo,
+        "boundary": {
+            "can_say": can_say,
+            "cannot_say": cannot_say,
+        },
+        "caveats": sorted(set(caveats), key=lambda x: int(x[1:])),
+        "quality": quality,
+        "as_of": rep.period_end,
+        "basis": "PA 月度净值与资金流精确盈亏 + 各品种月度贡献折算",
+        "period": [opening_date, closing_date],
+        "currency": rep.base_ccy,
+        "warnings": warnings,
+    }
+    res["value"] = res
+    return res
+

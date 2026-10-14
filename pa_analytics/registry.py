@@ -15,7 +15,11 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"window": _WIN}}},
     {"name": "get_monthly_returns", "description": "返回指定报告窗口内全部月度账户收益率、最高收益月份和最低收益月份，并附同期基准月收益。窗口使用受支持的通用窗口标签；最后一个报告月可能是部分月。",
      "parameters": {"type": "object", "properties": {"window": _WIN}}},
-    {"name": "get_attribution", "description": "某窗口按资产类别的盈亏归因（股票/ETF、股票期权、期货及期货期权及外汇合并、利息、费用），每项带精确/估算/未验证标记；必须附带返回的口径警告。",
+    {"name": "get_month_detail", "description": "用于回答某月收益高或低的原因，只给类别层面的收益占比，不能指明具体交易。包含当月精确盈亏、出入金排除、各品种贡献占比与自洽检查、现金类未解释部分以及严谨的回答边界（can_say / cannot_say）。",
+     "parameters": {"type": "object", "properties": {
+         "month": {"type": "string", "format": "year-month", "description": "指定月份 (YYYY-MM)"}},
+         "required": ["month"]}},
+    {"name": "get_attribution", "description": "某窗口按资产类别的盈亏归因（股票/ETF、股票期权、期货及期货期权及外汇合并、利息、费用），每项带精确/估算/未验证标记；必须附带返回的口径警告。不得用窗口归因推断某个月的原因。",
      "parameters": {"type": "object", "properties": {"window": _WIN}}},
     {"name": "get_yearly_table", "description": "按自然年的收益、TWR、净转入和归因。", "parameters": {"type": "object", "properties": {}}},
     {"name": "get_cash_interest", "description": "某窗口的利息、费用、平均现金和隐含年化利率（近似），可用于现金拖累分析。",
@@ -59,6 +63,8 @@ def call(target, name: str, args: dict | None = None, snapshots: list | None = N
         return {"value": pnl_data, "basis": "累计已实现+未实现盈亏（合约级，不可按时间切片；来自 table_symbol_pnl）",
                 "period": [None, None], "currency": rep.base_ccy, "status": "ok",
                 "warnings": ["合计与 MTM 口径不同（K10）；合约级，同一标的的不同合约未合并"]}
+    if name == "get_month_detail":
+        return M.month_detail(rep, a.get("month", ""))
 
     fn = {"get_window_summary": lambda: M.window_summary(rep, a.get("window", "YTD")),
           "get_monthly_returns": lambda: M.monthly_return_extremes(rep, a.get("window", "YTD")),

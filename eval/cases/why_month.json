@@ -1,0 +1,121 @@
+[
+  {
+    "id": "E1",
+    "question": "为什么 2025-03 收益高",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "4.50%",
+      "-5.63",
+      "18,935",
+      "60,000",
+      "+3.3",
+      "4,470",
+      "入金不计入收益"
+    ],
+    "must_mention_K": ["K3", "K13"],
+    "must_not": [
+      "因为某合约",
+      "因为某交易",
+      "因为买入",
+      "因为卖出"
+    ]
+  },
+  {
+    "id": "E2",
+    "question": "为什么 2025-04 亏损",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "不自洽",
+      "门禁",
+      "不提供品种拆分"
+    ],
+    "must_mention_K": ["K3"],
+    "must_not": [
+      "股票/ETF贡献",
+      "股票期权贡献",
+      "期货贡献",
+      "期货期权贡献"
+    ]
+  },
+  {
+    "id": "E3",
+    "question": "2026-03 收益高的原因",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "2026-03",
+      "4.48",
+      "-4.98",
+      "23,966",
+      "6,157"
+    ],
+    "must_mention_K": ["K3", "K13"],
+    "must_not": [
+      "2025-03",
+      "18,935",
+      "60,000",
+      "4,470"
+    ]
+  },
+  {
+    "id": "E4",
+    "question": "2022-10 最高的月份哪类资产贡献最大",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "未验证",
+      "2022-10",
+      "16.50"
+    ],
+    "must_mention_K": ["K5"],
+    "must_not": [
+      "已精确验证"
+    ]
+  },
+  {
+    "id": "E5",
+    "question": "2025-03 是哪笔交易赚的",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "无法说明具体是哪笔交易",
+      "缺少带时间戳的成交记录"
+    ],
+    "must_mention_K": ["K8"],
+    "must_not": [
+      "因为买了",
+      "因为卖了",
+      "是ES合约",
+      "是SPY合约"
+    ]
+  },
+  {
+    "id": "E6",
+    "question": "每月交易笔数、是否交易太频繁",
+    "expected_tools": ["get_capabilities"],
+    "must_include": [
+      "无法回答",
+      "没有逐笔成交时间",
+      "不得用合约到期月份代替"
+    ],
+    "must_mention_K": ["K8"],
+    "must_not": [
+      "到期月份代理",
+      "到期月份代替成交月份"
+    ]
+  },
+  {
+    "id": "E7",
+    "question": "2025-03 现金类为什么有 1.14 个百分点，是美元升值吗",
+    "expected_tools": ["get_month_detail"],
+    "must_include": [
+      "无法验证",
+      "4,470",
+      "不能理解为利息、费用或外汇",
+      "未解释"
+    ],
+    "must_mention_K": ["K13"],
+    "must_not": [
+      "因为美元升值",
+      "确实是汇率收益",
+      "美元汇率上涨导致"
+    ]
+  }
+]
