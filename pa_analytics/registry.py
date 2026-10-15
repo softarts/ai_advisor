@@ -36,18 +36,22 @@ def call(target, name: str, args: dict | None = None, snapshots: list | None = N
     from .loader import PAReport
     if isinstance(target, Store):
         store = target
-        rep = store.current()
+        rep = None
         snaps = snapshots if snapshots is not None else store.snapshots()
+        source = store
+        base_ccy = store.get_account_info()["base_currency"]
     elif isinstance(target, PAReport):
         store = None
         rep = target
         snaps = snapshots or []
+        source = rep
+        base_ccy = rep.base_ccy
     else:
         raise TypeError(f"Unsupported target type for tool execution: {type(target)}")
 
     a = args or {}
     if name == "get_capabilities":
-        value = M.get_capabilities(rep, snaps)
+        value = M.get_capabilities(source, snaps)
         return {"value": value, "basis": "imported PA report capabilities", "period": value.get("period"),
                 "currency": value.get("base_currency"), "status": "ok", "warnings": []}
     if name == "get_portfolio_detail":
@@ -61,23 +65,22 @@ def call(target, name: str, args: dict | None = None, snapshots: list | None = N
         n = a.get("n", 10)
         pnl_data = store.get_top_contributors(n)
         return {"value": pnl_data, "basis": "累计已实现+未实现盈亏（合约级，不可按时间切片；来自 table_symbol_pnl）",
-                "period": [None, None], "currency": rep.base_ccy, "status": "ok",
+                "period": [None, None], "currency": base_ccy, "status": "ok",
                 "warnings": ["合计与 MTM 口径不同（K10）；合约级，同一标的的不同合约未合并"]}
     if name == "get_month_detail":
-        return M.month_detail(rep, a.get("month", ""))
+        return M.month_detail(source, a.get("month", ""))
 
-    fn = {"get_window_summary": lambda: M.window_summary(rep, a.get("window", "YTD")),
-          "get_monthly_returns": lambda: M.monthly_return_extremes(rep, a.get("window", "YTD")),
-          "get_attribution": lambda: M.window_attribution(rep, a.get("window", "YTD")),
-          "get_yearly_table": lambda: M.yearly_table(rep),
-          "get_cash_interest": lambda: M.cash_interest(rep, a.get("window", "YTD")),
-          "get_top_contributors": lambda: M.top_contributors(rep, a.get("n", 10)),
-          "get_risk_measures": lambda: M.risk_measures(rep),
-          "get_open_positions": lambda: M.open_positions(rep)}.get(name)
+    fn = {"get_window_summary": lambda: M.window_summary(source, a.get("window", "YTD")),
+          "get_monthly_returns": lambda: M.monthly_return_extremes(source, a.get("window", "YTD")),
+          "get_attribution": lambda: M.window_attribution(source, a.get("window", "YTD")),
+          "get_yearly_table": lambda: M.yearly_table(source),
+          "get_cash_interest": lambda: M.cash_interest(source, a.get("window", "YTD")),
+          "get_top_contributors": lambda: M.top_contributors(source, a.get("n", 10)),
+          "get_risk_measures": lambda: M.risk_measures(source),
+          "get_open_positions": lambda: M.open_positions(source)}.get(name)
     if fn is None:
         raise KeyError(f"未知 tool: {name}")
     r = fn().to_dict()
     if name == "get_window_summary" and r["value"]:       # 曲线数据不给 LLM，节省上下文
         r["value"] = {k: v for k, v in r["value"].items() if k not in ("nav_series", "return_curves", "allocation", "flows")}
     return r
-

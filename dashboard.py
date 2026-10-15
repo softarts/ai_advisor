@@ -159,14 +159,16 @@ ORDER.forEach(([k,label],i)=>{
 </script></body></html>"""
 
 
-def build_payload(store: Store, rep) -> dict:
+def build_payload(store: Store, rep=None) -> dict:
     snaps = store.snapshots()
-    return {"account": rep.account, "currency": rep.base_ccy, "as_of": rep.period_end,
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "benchmarks": rep.benchmarks,
+    source = store if rep is None else rep
+    info = store.get_account_info()
+    return {"account": info["account"], "currency": info["base_currency"], "as_of": info["period_end"],
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "benchmarks": info["benchmarks"],
             "windows_order": list(WINDOWS), "labels": WINDOW_LABEL,
-            "windows": {w: {"summary": window_summary(rep, w).to_dict(), "attribution": window_attribution(rep, w).to_dict()}
+            "windows": {w: {"summary": window_summary(source, w).to_dict(), "attribution": window_attribution(source, w).to_dict()}
                         for w in WINDOWS},
-            "yearly": yearly_table(rep).to_dict(), "capabilities": get_capabilities(rep, snaps)}
+            "yearly": yearly_table(source).to_dict(), "capabilities": get_capabilities(source, snaps)}
 
 
 def main():
@@ -182,9 +184,9 @@ def main():
     for f in a.ingest:
         r = store.ingest(f, force=a.force)
         print(f"[{r['action']}] {f}" + (f"  {r['reason']}" if r["action"] == "rejected" else ""))
-    rep = store.current()
-    Path(a.out).write_text(HTML.replace("__DATA__", json.dumps(build_payload(store, rep), ensure_ascii=False)), encoding="utf-8")
-    print(f"已生成 {a.out}（数据截至 {rep.period_end}）")
+    info = store.get_account_info()
+    Path(a.out).write_text(HTML.replace("__DATA__", json.dumps(build_payload(store), ensure_ascii=False)), encoding="utf-8")
+    print(f"已生成 {a.out}（数据截至 {info['period_end']}）")
 
 
 if __name__ == "__main__":

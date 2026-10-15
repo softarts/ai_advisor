@@ -20,16 +20,23 @@ CLI 命令：`/help`、`/import-report [路径]`、`/history`、`/clear`、`/rem
 SQLite 数据库默认为 `data/pa.db`，采用多表数仓（Warehouse）分层架构：
 
 - `snapshots`：每次完整报告快照的元数据与解析后的 payload JSON，按源文件 SHA-256 去重。完全相同的文件再次导入返回 duplicate；不同内容的报告另存快照，保留旧版。当前报告按报告截止日期选择最新快照。
-- `table_portfolio`：规范化月末资产记录，字段包括 `snapshot_id`、`account_id`、`term_month`、`value`、`currency`。月份范围查询从该规范表检索。
+- `table_account_metadata`：规范化账户级元数据（基准币种、起止日期、基准清单、校验结果与关键统计）。
+- `table_portfolio`：规范化月末资产记录，字段包括 `snapshot_id`、`account_id`、`term_month`、`value`、`currency` 以及各类资产月末市值（`etfs`、`stocks`、`options`、`futures_options`、`cash` 等）。月份范围查询从该规范表检索。
 - `table_monthly_returns`：规范化月度收益率与基准收益，字段包括 `term_month`、`account_return`、`bm1_return`、`bm2_return`、`bm3_return`。
+- `table_monthly_contributions`：规范化月度各品种收益贡献百分点（`etfs`、`stocks`、`options`、`futures`、`futures_options`、`fs_options`、`cash`）。
 - `table_flows`：出入金资金流记录，字段包括 `flow_date`、`flow_type`、`description`、`amount`。
+- `table_cash_transactions`：现金交易明细表，统一记录利息（interest）、其他费用（fee）和股息（dividend）的逐笔日期与发生额。
 - `table_symbol_pnl`：合约级累计盈亏明细，字段包括 `symbol`、`instrument`、`avg_weight`、`ret_pct`、`contribution`、`unrealized`、`realized`、`total_pnl`、`open_status`，支持毫秒级排名前 N 赢家与输家查询。
 - `table_open_positions`：最新报告持仓记录，字段包括 `as_of_date`、`instrument`、`currency`、`symbol`、`quantity`、`close_price`、`value`、`cost_basis`、`unrealized`。
+- `table_risk_measures`：规范化月度风险指标表（最大回撤、夏普、索提诺、波动率等指标及其基准对比）。
+- `table_yearly_returns`：规范化自然年收益表，记录账户年度收益率及基准同期收益率。
+- `table_official_returns`：报告官方滚动区间收益表（MTD、QTD、YTD、1Y、3Y、5Y、Since Inception）。
+- `table_asset_weights`：资产类别配置与集中度权重表（市值口径）。
 - `data/raw/`：原始报告归档，文件名带账户、报告截止日和哈希前缀。
 
-Store 初始化时会自动执行 `_backfill()`，确保现有已导入快照无缝升级并填入所有分表。Store 向上提供结构化 Data API（如 `get_portfolio_series()`、`get_monthly_returns_data()`、`get_top_contributors()`、`get_flows_data()` 等）。
+Store 初始化时会自动执行 `_ensure_columns()` 和 `_backfill()`，确保现有已导入快照无缝升级并填入所有分表。Store 向上提供纯净的结构化 Data API（如 `get_portfolio_series()`、`get_portfolio_breakdown()`、`get_monthly_returns_data()`、`get_monthly_contributions()`、`get_flows_data()`、`get_cash_transactions()`、`get_risk_measures_data()`、`get_yearly_returns_data()`、`get_official_returns_data()`、`get_open_positions_summary()`、`get_top_contributors()` 等）。
 
-`get_portfolio_detail` 与其它 9 个工具统一通过 `pa_analytics.registry` 声明并经 `advisor.tools.create_tools(store)` 注册。LLM 不能执行任意 SQL；tool 函数统一经 Store 数据层和指标计算层查询规范数据。参数使用明确的区间与标准窗口标签，消除特例硬编码。
+所有 11 个工具统一通过 `pa_analytics.registry` 声明并经 `advisor.tools.create_tools(store)` 注册。LLM 不能执行任意 SQL；tool 函数统一经 Store 规范数据层和指标计算层查询规范数据，彻底解耦对底层报告原始反序列化对象的直接访问。参数使用明确的区间与标准窗口标签，消除特例硬编码。
 
 ## Dashboard
 
@@ -83,7 +90,7 @@ sequenceDiagram
     participant T as Tool 校验/执行
     participant D as Store / metrics / SQLite
     U->>G: 问题 + 本轮对话
-    G->>L: system context、消息、10 个工具 schema
+    G->>L: system context、消息、11 个工具 schema
     L-->>G: tool call（名称与 JSON 参数）
     G->>T: 校验必填项、类型、枚举、月份格式与数量边界
     T->>D: 执行规范数据查询或确定性指标计算

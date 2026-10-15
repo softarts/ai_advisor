@@ -66,7 +66,10 @@ class PAReport:
 
 def adapt_portfolio(rep: PAReport) -> list[dict]:
     """Map source-specific PA fields to canonical portfolio observations."""
-    return [{"term_month": row["month"], "value": row["nav"], "currency": rep.base_ccy}
+    return [{"term_month": row["month"], "value": row["nav"], "currency": rep.base_ccy,
+             "etfs": row.get("etfs"), "stocks": row.get("stocks"), "options": row.get("options"),
+             "futures_options": row.get("futures_options"), "cash": row.get("cash"),
+             "commodities": row.get("commodities"), "equities": row.get("equities")}
             for row in rep.nav_monthly]
 
 
