@@ -774,5 +774,4 @@ def month_detail(source, month: str) -> dict:
         "currency": base_ccy,
         "warnings": warnings,
     }
-    res["value"] = res
     return res

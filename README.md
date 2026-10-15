@@ -62,6 +62,53 @@ LangGraph `MemorySaver` 按 thread 保存短期消息；`InMemoryStore` 按 user
 
 LLM 通过 `httpx` 调用 OpenAI-compatible `/chat/completions`。配置从环境变量或项目根 `.env` 读取。每个运行实例在 `logs/advisor_<id>.jsonl` 记录用户输入、HTTP 请求/响应、tool 调用/结果、记忆操作和最终回答；Authorization header 不写入日志。日志含账户问题与返回数据，应按本地敏感文件管理。
 
+## 单月归因策略注入与约束引用（案例分析）
+
+以“9 月份收益率如何，做得好不好”为例，说明单月归因策略如何被注入、以及回答中“K13”这类约束引用从何而来。
+
+### 策略注入：每轮无条件拼入 system prompt
+
+`why_month_policy.md` 不是被“调用”的，而是每轮模型请求都无条件拼进 system prompt（`advisor/agent.py` 的 `_llm`）：
+
+```python
+policy_path = ... / "prompts" / "why_month_policy.md"
+if policy_path.exists():
+    system += "\n\n" + policy_path.read_text(encoding="utf-8")
+```
+
+它靠文件内的 `## 触发场景`（“用户询问‘为什么某月收益高/低’…”）让模型自行判断是否走五段式。当前该文件约 1691 字符（≈845–1100 tokens），与基础 system prompt、11 个工具 schema 叠加，构成每轮固定开销。
+
+### 约束引用：K13 的字面量来自工具，定义来自约束源
+
+回答里出现的“K13”并非 prompt 编造，而是工具 `get_month_detail` 计算后写进返回值、模型照抄：
+
+```
+pa_analytics/constraints.py  K13 定义（唯一事实源；get_capabilities 与看板“数据说明”均由此生成）
+        │
+        ├─ get_capabilities → 告知模型“现金类归因受 K13 约束”
+        │
+pa_analytics/metrics.py      get_month_detail 把“见 K13”写进 cash_category.note 与 boundary.cannot_say
+        │
+advisor/agent.py             why_month_policy.md 全文注入 system prompt
+        │
+prompts/why_month_policy.md  两条规则强制引用：
+   · 第 3 段“收益构成”：现金类必须单独列出“未解释部分”的金额与说明（标注 K13）
+   · 第 4 段“边界声明”：逐条引用工具返回的 boundary.cannot_say
+        │
+        ▼
+   LLM 照抄工具返回的 K13 文字 → 最终回答
+```
+
+即：`why_month_policy.md` 只负责“必须引用”，K13 的**内容**由 `get_month_detail` 产出、**定义**由 `constraints.py` 提供。这符合“报告专属内容只在 source adapter / 约束源，工具用规范模型”的约定。
+
+### 架构评估：fat system prompt 与渐进式披露
+
+当前“无条件全量注入”是已知的 fat system prompt 反模式，在 policy 变多时会放大。真正的问题不是体积，而是**不分意图地全量注入**——单月归因策略即使用户问“今年收益”也照样注入，靠 `## 触发场景` 软约束，不可靠。
+
+推荐方向是**核心常驻 + 渐进式披露**：把硬合规不变量（“严禁”负面清单、“单月问题必须先调 `get_month_detail`”）保留在常驻 system；把冗长的五段式模板与标准示例改为按意图加载（意图路由节点，或注册 `load_policy(intent)` 检索工具）。同时把 `why_month_policy.md` 从单体拆成按意图的片段。
+
+本域带 K1–K14 与大量“严禁”，按需加载存在“该加载却没加载”的合规风险，故拆分原则是：**不变量永远常驻，只有模板与示例这类纯格式/演示内容才按需加载**。当前 845 tokens 尚不值得引入路由复杂度；触发点是 policy 数量/体积增长，而非现在。
+
 ## Agent 工具清单、调用链与标准示例
 
 以下 11 个工具当前已注册到 Agent。窗口参数使用 `YTD`、`1M`、`3M`、`6M`、`1Y`、`3Y`、`5Y`、`ALL`；明细工具使用含首尾的 `YYYY-MM` 月份范围或单月份。`get_top_contributors.n` 允许 1–20。
@@ -172,6 +219,12 @@ sequenceDiagram
     调用链：`用户问题 → get_capabilities → NOT_ANSWERABLE / K7 → LLM 说明限制并拒答数值`。
 
     标准答案：不能。PA 报告没有占用保证金和剩余流动性数据，无法计算杠杆；需要导入含保证金字段的数据后才能评估。不能根据现金占比推断杠杆或风险低。
+
+12. **“我 9 月份收益率如何，做得好不好？”**
+
+    调用链：`用户问题 → get_month_detail(month="2026-09") → month_detail / 单月 TWR、资金流、品种贡献与边界 → LLM 按 why_month_policy 五段式回答`。这是单月归因问题，`why_month_policy.md` 强制模型走五段式并逐条引用 `boundary.cannot_say`。
+
+    标准答案：2026-09 账户月度 TWR +1.59%，SPXTR −0.35%，在 110 个完整月中排第 59（中等偏上）。月初净值 649,393.13、月末 707,216.54，净值变化 +57,823.41；当月净流入 +47,000.42（存入 50,000.42、取出 3,000.00），扣除流入后投资盈亏 +10,822.99。品种贡献（consistency=ok，仅供占比参考）：ETF +0.2950pp、股票期权 +0.1687pp、期货/期货期权合并 +0.6526pp、现金类 +0.4666pp（其中利息 +850.45、费用 −5.61、未解释部分约 2,345.26，标注 K13）。边界声明逐条引用 `cannot_say`：不能定位具体交易/合约/方向/时间（K8）、不能拆分期货与期货期权（K3）、不能断言现金未解释部分来源（K13）、无法给出杠杆/保证金/名义敞口（K7、K9）。
 
 ## Smoke check
 
