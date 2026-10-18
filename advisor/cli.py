@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -65,7 +66,8 @@ def main():
     args=parser.parse_args()
     _load_env()
     logdir=Path("logs"); logdir.mkdir(exist_ok=True)
-    log_path=logdir/f"advisor_{uuid.uuid4().hex}.jsonl"
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = logdir / f"advisor_{now_str}_{uuid.uuid4().hex[:8]}.jsonl"
     logger=logging.getLogger("advisor"); logger.setLevel(logging.INFO)
     handler=logging.FileHandler(log_path,encoding="utf-8"); handler.setFormatter(logging.Formatter("%(message)s")); logger.addHandler(handler)
     store=Store(args.db,args.raw_dir)

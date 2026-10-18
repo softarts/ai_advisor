@@ -45,38 +45,41 @@ dashboard 使用同一套 PA 指标计算，提供 YTD、1M、3M、6M、1Y、3Y�
 ## Agent、Graph、记忆与 LLM
 
 ```mermaid
-flowchart LR
-    U[CLI 用户输入] --> G[LangGraph]
-    G --> L[LLM HTTP chat completions]
-    L -->|文本回答| E[CLI 输出]
+flowchart TD
+    U[CLI 用户输入] --> R[router 节点\n调用 LLM 分类]
+    R -->|schema 校验失败 / unsupported| F[fixed_reply 节点\n返回固定回复，无工具]
+    R -->|product_info\n只传 get_capabilities| L[llm 节点\n按意图加载 compose 模板]
+    R -->|data_query\n传递 11 个工具| L
+    F --> E[CLI 输出]
+    L -->|文本回答| E
     L -->|tool call| T[注册工具]
     T --> D[规范数据层 / SQLite]
-    D --> T --> G
-    G -. checkpoint .-> S[短期对话记忆 MemorySaver]
-    G -. store .-> M[长期记忆 InMemoryStore]
+    D --> T --> L
 ```
 
-Graph 由 `llm` 与 `tools` 两个节点组成：LLM 请求携带注册工具的 JSON Schema；如返回 tool call，Graph 执行对应 Python 函数，把结果作为 tool message 回传 LLM，再取得最终回答。`Tool(name, description, params_schema, fn)` 将 schema 和本地函数绑定，新增工具应调用数据层 API。
+Graph 由 `router`、`llm`、`tools` 与 `fixed_reply` 节点组成：
+1. **router 节点**：接收用户输入后首先调用 LLM 进行意图识别，将问题分发至 `data_query`、`product_info` 或 `unsupported`。输出经过严格 JSON schema 校验，分类纯基于 LLM 语义判断（无关键词匹配）。若输出异常或 schema 校验失败，安全回退至 `unsupported`。
+2. **意图 Profile 注册表与 compose 模板**：
+   - 每个意图在 `INTENT_PROFILES` 注册表定义了版本号、对应的 compose 模板（位于 `prompts/<intent>.compose.md`）、允许调用的工具列表 (`allowed_tools`) 与策略检查项 (`policy_checks`)。
+   - `data_query`（v1.0）：加载 `data_query.compose.md`，允许全量 11 个数据分析工具。已全量迁入单月归因五段式及约束规则，且示例数值均已转换为占位符。
+   - `product_info`（v1.0）：加载 `product_info.compose.md`，仅允许 `get_capabilities`，回答系统边界与数据来源等元问题。
+   - `unsupported`（v1.0）：直接路由至 `fixed_reply` 节点输出固定友好答复，不调用 LLM 与任何工具。
+3. **llm 节点与 tools 节点**：依据意图加载专属 compose 模板与时区、数据截止日上下文，仅向模型提供对应意图声明的工具 schema；如返回 tool call，执行工具后作为 tool message 回传，直至产出最终答复。
 
 LangGraph `MemorySaver` 按 thread 保存短期消息；`InMemoryStore` 按 user namespace 保存 `/remember` 明确写入的键值，并在后续模型请求中提供。两者当前均为进程内存，不跨 CLI 重启持久化。
 
-LLM 通过 `httpx` 调用 OpenAI-compatible `/chat/completions`。配置从环境变量或项目根 `.env` 读取。每个运行实例在 `logs/advisor_<id>.jsonl` 记录用户输入、HTTP 请求/响应、tool 调用/结果、记忆操作和最终回答；Authorization header 不写入日志。日志含账户问题与返回数据，应按本地敏感文件管理。
+LLM 通过 `httpx` 调用 OpenAI-compatible `/chat/completions`。配置从环境变量或项目根 `.env` 读取。每个运行实例在 `logs/advisor_<datetime>_<random_ID>.jsonl` 记录用户输入、router 分类事件、HTTP 请求/响应、tool 调用/结果、记忆操作和最终回答；Authorization header 不写入日志。
 
 ## 单月归因策略注入与约束引用（案例分析）
 
 以“9 月份收益率如何，做得好不好”为例，说明单月归因策略如何被注入、以及回答中“K13”这类约束引用从何而来。
 
-### 策略注入：每轮无条件拼入 system prompt
+### 策略注入：按意图加载 Compose 模板
 
-`why_month_policy.md` 不是被“调用”的，而是每轮模型请求都无条件拼进 system prompt（`advisor/agent.py` 的 `_llm`）：
+原有 `why_month_policy.md` 的无条件全量注入已被移除，其内容完整迁入 `prompts/data_query.compose.md`。
 
-```python
-policy_path = ... / "prompts" / "why_month_policy.md"
-if policy_path.exists():
-    system += "\n\n" + policy_path.read_text(encoding="utf-8")
-```
-
-它靠文件内的 `## 触发场景`（“用户询问‘为什么某月收益高/低’…”）让模型自行判断是否走五段式。当前该文件约 1691 字符（≈845–1100 tokens），与基础 system prompt、11 个工具 schema 叠加，构成每轮固定开销。
+1. **按需加载**：当用户提问被 `router` 归类为 `data_query` 时，`_llm` 才会读取并注入 `data_query.compose.md`，避免在元信息问答或非数据场景中浪费 context 窗口。
+2. **模板占位符化**：原策略文件中写死的具体数字（如“110 个完整月”、2025-03 样例的具体数值与区间金额）均已重构为通用模板占位符（如 `{{total_complete_months}}`、`{{example_month}}`、`{{example_twr}}` 等），确保提示词规范且数据中立。
 
 ### 约束引用：K13 的字面量来自工具，定义来自约束源
 
@@ -89,9 +92,9 @@ pa_analytics/constraints.py  K13 定义（唯一事实源；get_capabilities 与
         │
 pa_analytics/metrics.py      get_month_detail 把“见 K13”写进 cash_category.note 与 boundary.cannot_say
         │
-advisor/agent.py             why_month_policy.md 全文注入 system prompt
+advisor/agent.py             通过 data_query.compose.md 注入对应规约
         │
-prompts/why_month_policy.md  两条规则强制引用：
+prompts/data_query.compose.md 两条规则强制引用：
    · 第 3 段“收益构成”：现金类必须单独列出“未解释部分”的金额与说明（标注 K13）
    · 第 4 段“边界声明”：逐条引用工具返回的 boundary.cannot_say
         │
@@ -99,15 +102,7 @@ prompts/why_month_policy.md  两条规则强制引用：
    LLM 照抄工具返回的 K13 文字 → 最终回答
 ```
 
-即：`why_month_policy.md` 只负责“必须引用”，K13 的**内容**由 `get_month_detail` 产出、**定义**由 `constraints.py` 提供。这符合“报告专属内容只在 source adapter / 约束源，工具用规范模型”的约定。
-
-### 架构评估：fat system prompt 与渐进式披露
-
-当前“无条件全量注入”是已知的 fat system prompt 反模式，在 policy 变多时会放大。真正的问题不是体积，而是**不分意图地全量注入**——单月归因策略即使用户问“今年收益”也照样注入，靠 `## 触发场景` 软约束，不可靠。
-
-推荐方向是**核心常驻 + 渐进式披露**：把硬合规不变量（“严禁”负面清单、“单月问题必须先调 `get_month_detail`”）保留在常驻 system；把冗长的五段式模板与标准示例改为按意图加载（意图路由节点，或注册 `load_policy(intent)` 检索工具）。同时把 `why_month_policy.md` 从单体拆成按意图的片段。
-
-本域带 K1–K14 与大量“严禁”，按需加载存在“该加载却没加载”的合规风险，故拆分原则是：**不变量永远常驻，只有模板与示例这类纯格式/演示内容才按需加载**。当前 845 tokens 尚不值得引入路由复杂度；触发点是 policy 数量/体积增长，而非现在。
+即：compose 模板负责规范必须引用的格式和负面清单，K13 的**内容**由 `get_month_detail` 产出、**定义**由 `constraints.py` 提供。这符合“报告专属内容只在 source adapter / 约束源，工具用规范模型”的约定。
 
 ## Agent 工具清单、调用链与标准示例
 
