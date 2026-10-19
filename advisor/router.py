@@ -51,7 +51,7 @@ INTENT_PROFILES: dict[str, dict[str, Any]] = {
         "policy_checks": ["require_tool_before_answer", "no_unverified_numbers"],
     },
     "product_info": {
-        "version": "1.0",
+        "version": "1.1",
         "compose_template": "product_info.compose.md",
         "allowed_tools": ["get_capabilities"],
         "policy_checks": [],
@@ -64,36 +64,37 @@ INTENT_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-# ---------------------------------------------------------------------------
-# JSON schema for router LLM output
-# ---------------------------------------------------------------------------
 _VALID_INTENTS = set(INTENT_PROFILES)
 
-_ROUTER_SYSTEM_PROMPT = """\
-你是一个意图分类器，只负责把用户问题归类到以下三个意图之一，不做任何其他回答。
+def _prompt_path(filename: str) -> Path:
+    return Path(__file__).resolve().parent.parent / "prompts" / filename
 
-意图定义：
-- data_query    用户询问与投资组合账户、收益、持仓、归因、历史数据等相关的问题，需要查询数据才能回答。
-- product_info  用户询问本系统的功能范围、能回答什么、数据来源、工具能力等元问题，无需实际数据。
-- unsupported   用户的问题与投资组合助手完全无关，或属于本系统明确不处理的范畴（如炒股建议、洗钱等）。
 
-输出格式（严格 JSON，不含 Markdown 代码块，不含任何额外文字）：
-{"intent": "<data_query|product_info|unsupported>", "reason": "<一句话说明分类理由>"}
-
-规则：
-- 直接输出结果，严禁输出任何思考过程、推理过程或思维链（Do not output any reasoning/thinking content）。
-- intent 只能是 data_query、product_info、unsupported 三个值之一。
-- reason 不超过 50 个汉字或英文单词。
-- 不得在 JSON 以外输出任何内容。
-"""
+def load_output_review_config(intent: str) -> dict[str, str] | None:
+    """Load optional review and fail-closed templates using the intent convention."""
+    profile = INTENT_PROFILES.get(intent)
+    if not profile:
+        return None
+    review_path = _prompt_path(f"{intent}.review.md")
+    failure_path = _prompt_path(f"{intent}.review_failed.md")
+    if not review_path.exists() and not failure_path.exists():
+        return None
+    if not review_path.is_file() or not failure_path.is_file():
+        raise FileNotFoundError(f"Incomplete output-review templates for intent {intent!r}")
+    return {
+        "template": review_path.read_text(encoding="utf-8"),
+        "policy": _prompt_path(profile["compose_template"]).read_text(encoding="utf-8"),
+        "failure_reply": failure_path.read_text(encoding="utf-8").strip(),
+    }
 
 
 def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | None) -> str:
     """Call the LLM with no tools and return raw response text."""
+    system_prompt = _prompt_path("intent_router.md").read_text(encoding="utf-8")
     payload = {
         "model": os.environ["LLM_MODEL"],
         "messages": [
-            {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
         "temperature": 0,
@@ -188,8 +189,7 @@ def load_compose_template(intent: str) -> str:
     filename = profile.get("compose_template", "")
     if not filename:
         return ""
-    path = Path(__file__).resolve().parent.parent / "prompts" / filename
+    path = _prompt_path(filename)
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
-

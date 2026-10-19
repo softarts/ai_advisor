@@ -3,7 +3,7 @@
 import sys
 sys.path.insert(0, "/Users/zhourui/work/ai_advisor")
 
-from advisor.router import INTENT_PROFILES, load_compose_template
+from advisor.router import INTENT_PROFILES, load_compose_template, load_output_review_config
 import logging
 
 # 1. Template loading
@@ -43,7 +43,17 @@ assert "110" not in dq, "hardcoded 110 found"
 assert "2025-03" not in dq, "hardcoded 2025-03 found"
 print("data_query placeholders OK")
 
-# 4. Agent graph structure
+# 4. Product-info scope and configured fail-closed review
+router_prompt = open("prompts/intent_router.md", encoding="utf-8").read()
+product_prompt = load_compose_template("product_info")
+review_config = load_output_review_config("product_info")
+assert "通用金融概念" in router_prompt
+assert "不得提及 IBKR 以外公司的产品" in product_prompt
+assert review_config and review_config["template"] and review_config["policy"]
+assert review_config["failure_reply"]
+print("product-info routing and output-review configuration OK")
+
+# 5. Agent graph structure
 from advisor.agent import Advisor, State
 from pa_analytics import Store
 from advisor.tools import create_tools
@@ -62,8 +72,9 @@ assert "router" in nodes
 assert "llm" in nodes
 assert "fixed_reply" in nodes
 assert "tools" in nodes
+assert "output_review" in nodes
 
-# 5. profile allowed_tools integrity
+# 6. profile allowed_tools integrity
 from advisor.router import INTENT_PROFILES
 all_tool_names = {t.name for t in tools}
 for intent, profile in INTENT_PROFILES.items():
@@ -72,4 +83,3 @@ for intent, profile in INTENT_PROFILES.items():
     print(f"{intent}: {len(profile['allowed_tools'])} allowed tools OK")
 
 print("\nAll smoke checks passed.")
-

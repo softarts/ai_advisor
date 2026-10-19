@@ -15,7 +15,13 @@ from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from .tools import execute
-from .router import INTENT_PROFILES, classify_intent, load_compose_template
+from .output_review import parse_review_verdict
+from .router import (
+    INTENT_PROFILES,
+    classify_intent,
+    load_compose_template,
+    load_output_review_config,
+)
 
 
 class State(TypedDict):
@@ -37,6 +43,7 @@ class Advisor:
         graph.add_node("router", self._router)
         graph.add_node("llm", self._llm)
         graph.add_node("tools", self._tools)
+        graph.add_node("output_review", self._output_review)
         graph.add_node("fixed_reply", self._fixed_reply)
         graph.add_edge(START, "router")
         graph.add_conditional_edges(
@@ -44,8 +51,9 @@ class Advisor:
             self._route_intent,
             {"llm": "llm", "fixed_reply": "fixed_reply"},
         )
-        graph.add_conditional_edges("llm", self._route, {"tools": "tools", "end": END})
+        graph.add_conditional_edges("llm", self._route, {"tools": "tools", "review": "output_review"})
         graph.add_edge("tools", "llm")
+        graph.add_edge("output_review", END)
         graph.add_edge("fixed_reply", END)
         self.graph = graph.compile(checkpointer=self.checkpointer, store=self.store)
 
@@ -173,7 +181,82 @@ class Advisor:
                                        if msg.get("reasoning_content") else {})]}
 
     def _route(self, state):
-        return "tools" if state["messages"][-1].tool_calls else "end"
+        return "tools" if state["messages"][-1].tool_calls else "review"
+
+    def _output_review(self, state):
+        from langchain_core.messages import AIMessage
+
+        intent = state.get("intent") or ""
+        review_config = load_output_review_config(intent)
+        if review_config is None:
+            return {}
+
+        user_message = next(
+            (message for message in reversed(state["messages"]) if message.type == "human"),
+            None,
+        )
+        candidate = state["messages"][-1].content
+        tool_results = [
+            {"content": message.content}
+            for message in state["messages"]
+            if message.type == "tool"
+        ]
+        if user_message is None or not isinstance(candidate, str) or not candidate.strip():
+            self.logger.error(json.dumps({
+                "event": "output_review_unavailable_input",
+                "trace_id": self.trace_id,
+                "intent": intent,
+            }, ensure_ascii=False))
+            return {"messages": [AIMessage(content=review_config["failure_reply"])]}
+
+        try:
+            payload = {
+                "model": os.environ["LLM_MODEL"],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": review_config["template"] + "\n\n" + review_config["policy"],
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({
+                            "question": user_message.content,
+                            "candidate_answer": candidate,
+                            "tool_results": tool_results,
+                        }, ensure_ascii=False),
+                    },
+                ],
+                "temperature": 0,
+                "max_tokens": 300,
+            }
+            headers = {
+                "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
+                "Content-Type": "application/json",
+            }
+            url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
+            response = httpx.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"].get("content") or ""
+            verdict = parse_review_verdict(content)
+        except Exception as exc:
+            self.logger.error(json.dumps({
+                "event": "output_review_error",
+                "trace_id": self.trace_id,
+                "intent": intent,
+                "error": str(exc),
+            }, ensure_ascii=False))
+            return {"messages": [AIMessage(content=review_config["failure_reply"])]}
+
+        self.logger.info(json.dumps({
+            "event": "output_review_result",
+            "trace_id": self.trace_id,
+            "intent": intent,
+            "decision": verdict["decision"],
+            "reason": verdict["reason"],
+        }, ensure_ascii=False))
+        if verdict["decision"] == "pass":
+            return {}
+        return {"messages": [AIMessage(content=review_config["failure_reply"])]}
 
     def _tools(self, state):
         from langchain_core.messages import ToolMessage
