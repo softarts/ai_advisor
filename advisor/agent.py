@@ -206,6 +206,16 @@ class Advisor:
             }, ensure_ascii=False))
             notice = "⚠️ 答案检查输入不完整，数据准确性无法确认。"
             safe_candidate = candidate if isinstance(candidate, str) else ""
+            self.logger.info(json.dumps({
+                "event": "output_review_summary",
+                "trace_id": self.trace_id,
+                "intent": intent,
+                "checks_run": [],
+                "failed_checks": [{"check_id": "checklist", "reason": "output review input is incomplete"}],
+                "notes": [notice],
+                "annotated": True,
+                "passed": False,
+            }, ensure_ascii=False))
             return {"messages": [AIMessage(content=f"{safe_candidate}\n\n{notice}".strip())]}
 
         review_config = load_output_review_config(intent)
@@ -219,6 +229,8 @@ class Advisor:
             review_config=review_config,
         )
         failed_checks = []
+        unavailable_checks = []
+        checks_run: list[str] = []
         if intent not in INTENT_CHECKLISTS:
             self.logger.error(json.dumps({
                 "event": "output_review_configuration_error",
@@ -226,7 +238,7 @@ class Advisor:
                 "intent": intent,
                 "error": "intent has no configured checklist",
             }, ensure_ascii=False))
-            failed_checks.append(("checklist", "答案检查配置缺失，数据准确性无法确认。", "intent has no configured checklist"))
+            unavailable_checks.append(("checklist", "答案检查配置缺失，数据准确性无法确认。", "intent has no configured checklist"))
         for check_id in dict.fromkeys(
             GLOBAL_CHECKLIST + INTENT_CHECKLISTS.get(intent, [])
         ):
@@ -241,7 +253,7 @@ class Advisor:
                     "check_id": check_id,
                     "error": error,
                 }, ensure_ascii=False))
-                failed_checks.append((check_id, definition["failure_note"] if definition else error, error))
+                unavailable_checks.append((check_id, definition["unavailable_note"] if definition else error, error))
                 continue
             if not definition["enabled"]:
                 continue
@@ -249,6 +261,7 @@ class Advisor:
                 outcome = checker(context)
                 if outcome.candidate is not None:
                     context.candidate = outcome.candidate
+                checks_run.append(check_id)
                 if not outcome.passed:
                     failed_checks.append((check_id, outcome.note or definition["failure_note"], outcome.reason))
                 self.logger.info(json.dumps({
@@ -267,23 +280,30 @@ class Advisor:
                     "check_id": check_id,
                     "error": str(exc),
                 }, ensure_ascii=False))
-                failed_checks.append((check_id, definition["failure_note"], str(exc)))
+                unavailable_checks.append((check_id, definition["unavailable_note"], str(exc)))
 
-        if not failed_checks and context.candidate == candidate:
-            return {}
-        notes = [note for _, note, _ in failed_checks if note]
-        if failed_checks:
+        notes = [note for _, note, _ in failed_checks + unavailable_checks if note]
+        if notes:
             context.candidate += "\n\n" + "\n".join(dict.fromkeys(f"⚠️ {note}" for note in notes))
-        self.logger.warning(json.dumps({
+        self.logger.info(json.dumps({
             "event": "output_review_summary",
             "trace_id": self.trace_id,
             "intent": intent,
+            "checks_run": checks_run,
             "failed_checks": [
                 {"check_id": check_id, "reason": reason}
                 for check_id, _, reason in failed_checks
             ],
-            "passed": not failed_checks,
+            "unavailable_checks": [
+                {"check_id": check_id, "reason": reason}
+                for check_id, _, reason in unavailable_checks
+            ],
+            "notes": notes,
+            "annotated": context.candidate != candidate,
+            "passed": not failed_checks and not unavailable_checks,
         }, ensure_ascii=False))
+        if not failed_checks and not unavailable_checks and context.candidate == candidate:
+            return {}
         return {"messages": [AIMessage(content=context.candidate)]}
 
     def _tools(self, state):

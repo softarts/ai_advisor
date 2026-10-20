@@ -90,9 +90,13 @@ def _period(source, inc: list) -> dict:
         series = ([[start.isoformat(), v0]] if anchor else []) + [[_month_end(source, m).isoformat(), navs[m]["nav"]] for m in inc]
         alloc = [{"date": _month_end(source, m).isoformat(), **{k: navs[m][k] or 0 for k in
                   ("etfs", "futures_options", "options", "stocks", "cash")}, "nav": navs[m]["nav"]} for m in inc]
+        account_twr = (cum["account"] - 1) * 100
+        benchmark_twr = {benchmarks[i]: (cum[f"bm{i+1}"] - 1) * 100 for i in range(len(benchmarks))}
         return {"months": inc, "start_date": start.isoformat(), "end_date": end.isoformat(), "start_nav": v0, "end_nav": v1,
+                "nav_change": v1 - v0,
                 "deposits": dep, "withdrawals": wd, "net_flow": dep + wd, "profit": v1 - v0 - (dep + wd),
-                "twr_pct": (cum["account"] - 1) * 100, "benchmark_twr_pct": {benchmarks[i]: (cum[f"bm{i+1}"] - 1) * 100 for i in range(len(benchmarks))},
+                "twr_pct": account_twr, "benchmark_twr_pct": benchmark_twr,
+                "excess_vs_benchmark_pp": {name: account_twr - value for name, value in benchmark_twr.items()},
                 "nav_series": series, "return_curves": {"account": curve["account"], **{benchmarks[i]: curve[f"bm{i+1}"] for i in range(len(benchmarks))}},
                 "allocation": alloc, "flows": [[f["date"], f["amount"]] for f in fl]}
     else:
@@ -116,9 +120,13 @@ def _period(source, inc: list) -> dict:
         series = ([[start.isoformat(), v0]] if anchor else []) + [[_month_end(rep, m).isoformat(), navs[m]["nav"]] for m in inc]
         alloc = [{"date": _month_end(rep, m).isoformat(), **{k: navs[m][k] or 0 for k in
                   ("etfs", "futures_options", "options", "stocks", "cash")}, "nav": navs[m]["nav"]} for m in inc]
+        account_twr = (cum["account"] - 1) * 100
+        benchmark_twr = {rep.benchmarks[i]: (cum[f"bm{i+1}"] - 1) * 100 for i in range(3)}
         return {"months": inc, "start_date": start.isoformat(), "end_date": end.isoformat(), "start_nav": v0, "end_nav": v1,
+                "nav_change": v1 - v0,
                 "deposits": dep, "withdrawals": wd, "net_flow": dep + wd, "profit": v1 - v0 - (dep + wd),
-                "twr_pct": (cum["account"] - 1) * 100, "benchmark_twr_pct": {rep.benchmarks[i]: (cum[f"bm{i+1}"] - 1) * 100 for i in range(3)},
+                "twr_pct": account_twr, "benchmark_twr_pct": benchmark_twr,
+                "excess_vs_benchmark_pp": {name: account_twr - value for name, value in benchmark_twr.items()},
                 "nav_series": series, "return_curves": {"account": curve["account"], **{rep.benchmarks[i]: curve[f"bm{i+1}"] for i in range(3)}},
                 "allocation": alloc, "flows": [[f["date"], f["amount"]] for f in fl]}
 

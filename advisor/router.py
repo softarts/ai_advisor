@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,60 @@ def load_output_review_config(intent: str) -> dict[str, str] | None:
     }
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Return the first complete JSON object found in ``text``.
+
+    Reasoning models often wrap their answer in prose, repeat the payload, or
+    emit several candidate objects. Scanning for balanced braces and validating
+    each candidate finds the first usable object instead of slicing from the
+    first ``{`` to the last ``}``.
+    """
+    if not text:
+        return None
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped).strip()
+    candidates = []
+    try:
+        candidates.append(stripped)
+    except ValueError:
+        pass
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for index, char in enumerate(stripped):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    candidates.append(stripped[start:index + 1])
+                    start = -1
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return candidate
+    return None
+
+
 def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | None) -> str:
     """Call the LLM with no tools and return raw response text."""
     system_prompt = _prompt_path("intent_router.md").read_text(encoding="utf-8")
@@ -134,13 +189,9 @@ def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | Non
     message = response.json()["choices"][0]["message"]
     content = message.get("content")
     if not content:
-        # Fallback: if model only produced reasoning_content, check if JSON exists in it
-        reasoning = message.get("reasoning_content") or ""
-        if "{" in reasoning and "}" in reasoning:
-            content = reasoning[reasoning.find("{"):reasoning.rfind("}") + 1]
-        else:
-            content = ""
-    return content
+        # Reasoning models may put the whole answer in reasoning_content.
+        content = message.get("reasoning_content") or ""
+    return content or ""
 
 
 def classify_intent(user_text: str, logger: logging.Logger, trace_id: str | None) -> str:
@@ -151,15 +202,11 @@ def classify_intent(user_text: str, logger: logging.Logger, trace_id: str | None
     """
     try:
         raw = _call_router_llm(user_text, logger, trace_id)
-        # Strip accidental markdown fences if the model disobeys instructions
-        raw = (raw or "").strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
+        payload_text = _extract_json_object(raw)
+        if payload_text is None:
+            raise ValueError("router response contains no JSON object")
 
-        data = json.loads(raw)
+        data = json.loads(payload_text)
         if not isinstance(data, dict):
             raise ValueError("router response is not a JSON object")
         intent = data.get("intent")

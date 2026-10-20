@@ -1,0 +1,141 @@
+{
+  "intent": "data_query",
+  "description": "数据查询类用例。期望值取自当前快照 (账户 U9628699, 报告截止 2026-10-09) 的工具实际返回。",
+  "cases": [
+    {
+      "id": "DQ01",
+      "name": "过去三年最高/最低收益月份",
+      "question": "过去三年哪个月份收益率最高？最低的是哪个月？",
+      "expected_tools": ["get_monthly_returns"],
+      "must_include": ["2025-03", "4.49", "2025-05", "-4.02"],
+      "must_not": ["2022-10", "16.50"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ02",
+      "name": "指定月份区间月末资产",
+      "question": "列出 2026 年 9 月到 10 月的月末资产。",
+      "expected_tools": ["get_portfolio_detail"],
+      "must_include": ["707,216", "713,223", "2026-09", "2026-10"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "DQ03",
+      "name": "一年期资产变化与基准对比",
+      "question": "过去一年资产变化多少？和三个基准比如何？",
+      "expected_tools": ["get_window_summary"],
+      "must_include": ["532,216", "713,223", "104,006", "19.35", "SPXTR", "EFA", "VT"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "DQ04",
+      "name": "YTD 收益与基准对比",
+      "question": "今年收益如何，比标普好吗？",
+      "expected_tools": ["get_window_summary"],
+      "must_include": ["16.73", "15.14"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "DQ05",
+      "name": "YTD 资产类别归因",
+      "question": "今年的收益主要来自哪些资产类别？",
+      "expected_tools": ["get_attribution"],
+      "must_include": ["4,669", "3,898", "5,930", "77,660", "92,088"],
+      "must_not": ["期货贡献", "期货期权贡献", "外汇贡献"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ06",
+      "name": "年度收益最好/最差",
+      "question": "哪一年收益最好、哪一年最差？",
+      "expected_tools": ["get_yearly_table"],
+      "must_include": ["2023", "31.88", "2018", "-28.16"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "DQ07",
+      "name": "现金利息与隐含收益率",
+      "question": "今年现金利息和隐含收益率是多少？",
+      "expected_tools": ["get_cash_interest"],
+      "must_include": ["5,930", "-68", "592,820", "1.29"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "DQ08",
+      "name": "累计盈亏最大合约",
+      "question": "历史上盈亏最大的合约是什么？最差的是哪个？",
+      "expected_tools": ["get_top_contributors"],
+      "must_include": ["ESM5", "107,932", "SPY", "-53,431"],
+      "must_not": ["按月", "成交月份"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ09",
+      "name": "风险指标：回撤与夏普",
+      "question": "最大回撤是多少，恢复情况如何？夏普比率是多少？",
+      "expected_tools": ["get_risk_measures"],
+      "must_include": ["65.20", "75", "0.0610"],
+      "must_not": ["日度回撤", "日内回撤"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ10",
+      "name": "当前持仓与币种现金",
+      "question": "现在的持仓配置和 SGD/USD 现金分别是多少？",
+      "expected_tools": ["get_open_positions"],
+      "must_include": ["2026-10-09", "SGD", "USD"],
+      "must_not": ["风险口径", "杠杆"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ11",
+      "name": "单月归因：收益高的月份",
+      "question": "为什么 2025-03 收益这么高？",
+      "expected_tools": ["get_month_detail"],
+      "must_include": ["4.49", "-5.63", "18,935", "60,000", "3.3", "4,470", "入金不计入收益", "K3", "K13"],
+      "must_not": ["因为某笔交易", "因为某合约", "因为买入", "因为卖出", "是 ES 合约"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ12",
+      "name": "单月归因：自洽门禁生效",
+      "question": "为什么 2025-04 亏损？",
+      "expected_tools": ["get_month_detail"],
+      "must_include": ["-3.75", "不自洽", "门禁", "不提供品种拆分", "K3"],
+      "must_not": ["股票/ETF 贡献", "股票期权贡献", "期货贡献 +", "期货期权贡献 +"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ13",
+      "name": "单月归因：现金类未解释部分",
+      "question": "2025-03 现金类为什么有 1.14 个百分点，是美元升值吗？",
+      "expected_tools": ["get_month_detail"],
+      "must_include": ["无法验证", "4,470", "未解释", "K13"],
+      "must_not": ["因为美元升值", "确实是汇率收益", "美元汇率上涨导致"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ14",
+      "name": "超出报告能力：逐笔成交时间",
+      "question": "每月交易笔数是多少？是不是交易太频繁？",
+      "expected_tools": ["get_capabilities"],
+      "must_include": ["无法回答", "K8"],
+      "must_not": ["到期月份代替成交月份", "用到期月份代理"],
+      "expect_note": false
+    },
+    {
+      "id": "DQ15",
+      "name": "超出报告能力：杠杆与保证金",
+      "question": "这份报告能告诉我账户杠杆是多少吗？",
+      "expected_tools": ["get_capabilities"],
+      "must_include": ["无法回答", "K7"],
+      "must_not": ["杠杆是", "杠杆约为"],
+      "expect_note": false
+    }
+  ]
+}

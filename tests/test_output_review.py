@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from advisor.agent import Advisor
 from advisor.checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
@@ -33,6 +33,16 @@ class OutputReviewTests(unittest.TestCase):
         for response in invalid_responses:
             with self.subTest(response=response), self.assertRaises(ValueError):
                 parse_review_verdict(response)
+
+    def test_parse_review_verdict_tolerates_surrounding_prose(self):
+        responses = (
+            '好的，判定结果：{"decision": "pass", "reason": "符合策略"}',
+            '```json\n{"decision": "fail", "reason": "越界"}\n```',
+            '{"decision": "pass", "reason": "符合策略"} 完毕。',
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                self.assertIn(parse_review_verdict(response)["decision"], {"pass", "fail", "uncertain"})
 
     def _advisor(self):
         return Advisor([], logging.getLogger("output-review-test"))
@@ -97,7 +107,7 @@ class OutputReviewTests(unittest.TestCase):
         with self._llm_env(), patch("advisor.output_review.httpx.post", return_value=InvalidResponse()):
             result = advisor._output_review(self._state("Candidate answer."))
         self.assertIn("Candidate answer.", result["messages"][0].content)
-        self.assertIn(GLOBAL_CHECKS["product_policy"]["failure_note"], result["messages"][0].content)
+        self.assertIn(GLOBAL_CHECKS["product_policy"]["unavailable_note"], result["messages"][0].content)
 
     def test_review_error_fails_open_with_note(self):
         advisor = self._advisor()
@@ -107,13 +117,13 @@ class OutputReviewTests(unittest.TestCase):
         ):
             result = advisor._output_review(self._state("Candidate answer."))
         self.assertIn("Candidate answer.", result["messages"][0].content)
-        self.assertIn(GLOBAL_CHECKS["product_policy"]["failure_note"], result["messages"][0].content)
+        self.assertIn(GLOBAL_CHECKS["product_policy"]["unavailable_note"], result["messages"][0].content)
 
     def test_numeric_values_are_normalized_and_annotated(self):
         context = CheckContext(
             intent="data_query",
             question="Is my return 20%?",
-            candidate="收益 -19.35%，金额为 -5万 USD。",
+            candidate="收益 +19.35%，金额为 +5万 USD。",
             tool_results=[{
                 "tool": "get_window_summary",
                 "content": json.dumps({
@@ -126,8 +136,8 @@ class OutputReviewTests(unittest.TestCase):
         )
         outcome = check_numeric_provenance(context)
         self.assertTrue(outcome.passed)
-        self.assertIn("-19.35%〔来源：get_window_summary$.value.twr_pct〕", outcome.candidate)
-        self.assertIn("-5万 USD〔来源：get_window_summary$.value.profit〕", outcome.candidate)
+        self.assertIn("+19.35%〔来源：get_window_summary$.value.twr_pct〕", outcome.candidate)
+        self.assertIn("+5万 USD〔来源：get_window_summary$.value.profit〕", outcome.candidate)
         self.assertIn("数字来源：", outcome.candidate)
 
     def test_numeric_values_in_tool_text_are_valid_evidence(self):
@@ -192,6 +202,248 @@ class OutputReviewTests(unittest.TestCase):
         answer = result["messages"][0].content
         self.assertIn("Candidate answer.", answer)
         self.assertIn("答案检查输入不完整", answer)
+
+
+class NumericSignTests(unittest.TestCase):
+    """A sign flip on a financial figure must not pass the provenance check."""
+
+    def _check(self, candidate, tool_value, key, currency="SGD"):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_window_summary",
+                "content": json.dumps({
+                    "value": {key: tool_value},
+                    "currency": currency,
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        return check_numeric_provenance(context)
+
+    def test_opposite_sign_on_ratio_is_rejected(self):
+        outcome = self._check("收益 -4.50%。", 4.50, "twr_pct")
+        self.assertFalse(outcome.passed)
+        self.assertIn("4.50", outcome.reason)
+
+    def test_matching_sign_on_ratio_passes(self):
+        self.assertTrue(self._check("收益 +4.50%。", 4.50, "twr_pct").passed)
+
+    def test_unsigned_number_still_passes(self):
+        self.assertTrue(self._check("收益 4.50%。", 4.50, "twr_pct").passed)
+
+    def test_opposite_sign_on_amount_is_rejected(self):
+        outcome = self._check("盈亏 -18,935.00 SGD。", 18935.00, "profit")
+        self.assertFalse(outcome.passed)
+
+    def test_matching_sign_on_amount_passes(self):
+        self.assertTrue(self._check("盈亏 +18,935.00 SGD。", 18935.00, "profit").passed)
+
+
+class UnavailableCheckTests(unittest.TestCase):
+    """A check that could not run must be reported differently from a failed check."""
+
+    def test_unrunnable_check_uses_unavailable_note(self):
+        advisor = Advisor([], logging.getLogger("output-review-test"))
+        with patch.dict(os.environ, {}, clear=True):
+            result = advisor._output_review({
+                "intent": "product_info",
+                "messages": [HumanMessage(content="什么是 CFD？"), AIMessage(content="CFD 是一种衍生品。")],
+            })
+        answer = result["messages"][0].content
+        self.assertIn("CFD 是一种衍生品。", answer)
+        self.assertIn(GLOBAL_CHECKS["product_policy"]["unavailable_note"], answer)
+        self.assertNotIn(GLOBAL_CHECKS["product_policy"]["failure_note"], answer)
+
+
+class OutputReviewLoggingTests(unittest.TestCase):
+    """The review must be observable in the JSONL log for every reviewed answer."""
+
+    def _capturing_logger(self):
+        logger = logging.getLogger("output-review-log-test")
+        logger.setLevel(logging.INFO)
+        logger.handlers = []
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(json.loads(record.getMessage()))
+
+        logger.addHandler(Capture())
+        return logger, records
+
+    def test_passing_review_is_logged_with_summary(self):
+        logger, records = self._capturing_logger()
+        advisor = Advisor([], logger)
+        advisor.trace_id = "trace-pass"
+        advisor._output_review({
+            "intent": "data_query",
+            "messages": [HumanMessage(content="q"), AIMessage(content="没有具体数字的描述。")],
+        })
+        events = [record.get("event") for record in records]
+        self.assertIn("output_review_check", events)
+        self.assertIn("output_review_summary", events)
+        summary = next(r for r in records if r.get("event") == "output_review_summary")
+        self.assertTrue(summary["passed"])
+        self.assertEqual(summary["failed_checks"], [])
+        self.assertEqual(summary["checks_run"], ["numeric_provenance"])
+        self.assertEqual(summary["trace_id"], "trace-pass")
+
+    def test_failing_review_is_logged_with_failed_checks(self):
+        logger, records = self._capturing_logger()
+        advisor = Advisor([], logger)
+        advisor.trace_id = "trace-fail"
+        advisor._output_review({
+            "intent": "data_query",
+            "messages": [HumanMessage(content="q"), AIMessage(content="收益 19.35%。")],
+        })
+        summary = next(r for r in records if r.get("event") == "output_review_summary")
+        self.assertFalse(summary["passed"])
+        self.assertEqual(summary["failed_checks"][0]["check_id"], "numeric_provenance")
+        self.assertTrue(summary["notes"])
+        self.assertTrue(summary["annotated"])
+
+    def test_incomplete_review_input_is_logged_as_summary(self):
+        logger, records = self._capturing_logger()
+        advisor = Advisor([], logger)
+        advisor.trace_id = "trace-incomplete"
+        advisor._output_review({
+            "intent": "data_query",
+            "messages": [AIMessage(content="Candidate answer.")],
+        })
+        events = [record.get("event") for record in records]
+        self.assertIn("output_review_unavailable_input", events)
+        self.assertIn("output_review_summary", events)
+        summary = next(r for r in records if r.get("event") == "output_review_summary")
+        self.assertFalse(summary["passed"])
+
+
+class AnnotationIdempotencyTests(unittest.TestCase):
+    """Re-checking an already annotated answer must not duplicate annotations."""
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({"value": {"twr_pct": 4.50}, "currency": "SGD"}),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_second_pass_produces_identical_output(self):
+        first = check_numeric_provenance(self._context("收益 +4.50%。"))
+        second = check_numeric_provenance(self._context(first.candidate))
+        self.assertEqual(first.candidate, second.candidate)
+
+    def test_annotation_block_is_not_duplicated(self):
+        first = check_numeric_provenance(self._context("收益 +4.50%。"))
+        second = check_numeric_provenance(self._context(first.candidate))
+        self.assertEqual(second.candidate.count("数字来源："), 1)
+        self.assertEqual(second.candidate.count("〔来源："), 1)
+
+    def test_prior_annotation_is_stripped_before_matching(self):
+        annotated = "收益 +4.50%〔来源：get_month_detail$.value.twr_pct〕。\n\n数字来源：\n-  +4.50%：get_month_detail$.value.twr_pct"
+        outcome = check_numeric_provenance(self._context(annotated))
+        self.assertTrue(outcome.passed)
+
+
+class AnnotationReplacementTests(unittest.TestCase):
+    """Overlapping-length annotations must not corrupt the answer text."""
+
+    def test_date_and_number_annotations_do_not_corrupt_text(self):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate="2025-04 TWR -3.75%，触发门禁。",
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "month": "2025-04",
+                    "return": {"twr_pct": -3.746787323},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        outcome = check_numeric_provenance(context)
+        self.assertIn("2025-04〔来源：", outcome.candidate)
+        self.assertIn("-3.75%〔来源：", outcome.candidate)
+        self.assertIn("触发门禁。", outcome.candidate)
+        self.assertNotIn("〕th", outcome.candidate)
+        self.assertNotIn("S-3.75", outcome.candidate)
+
+    def test_annotations_preserve_original_reading_order(self):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate="2025-04 TWR -3.75%。",
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "month": "2025-04",
+                    "return": {"twr_pct": -3.746787323},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        candidate = check_numeric_provenance(context).candidate
+        self.assertLess(candidate.index("2025-04"), candidate.index("-3.75%"))
+        self.assertIn("TWR -3.75%〔来源：", candidate)
+
+
+class MultiTurnReviewTests(unittest.TestCase):
+    """Tool evidence from earlier turns must still support later answers."""
+
+    def _advisor(self):
+        return Advisor([], logging.getLogger("output-review-test"))
+
+    def test_tool_result_from_earlier_turn_is_still_evidence(self):
+        advisor = self._advisor()
+        result = advisor._output_review({
+            "intent": "data_query",
+            "messages": [
+                HumanMessage(content="第一轮"),
+                ToolMessage(
+                    content=json.dumps({"value": {"twr_pct": 4.50}, "currency": "SGD"}),
+                    tool_call_id="c1",
+                    name="get_window_summary",
+                ),
+                HumanMessage(content="第二轮"),
+                AIMessage(content="收益 +4.50%。"),
+            ],
+        })
+        answer = result["messages"][0].content
+        self.assertIn("get_window_summary$.value.twr_pct", answer)
+        self.assertNotIn("⚠️", answer)
+
+    def test_invented_number_in_later_turn_is_flagged(self):
+        advisor = self._advisor()
+        result = advisor._output_review({
+            "intent": "data_query",
+            "messages": [
+                HumanMessage(content="第一轮"),
+                ToolMessage(
+                    content=json.dumps({"value": {"twr_pct": 4.50}, "currency": "SGD"}),
+                    tool_call_id="c1",
+                    name="get_window_summary",
+                ),
+                HumanMessage(content="第二轮"),
+                AIMessage(content="第一轮收益 +4.50%，这一轮收益 +99.99%。"),
+            ],
+        })
+        answer = result["messages"][0].content
+        self.assertIn("未在工具结果中匹配", answer)
+        self.assertIn(GLOBAL_CHECKS["numeric_provenance"]["failure_note"], answer)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,36 @@ def ensure_llm_settings() -> dict[str, str]:
     }
 
 
+def preflight(settings: dict[str, str]) -> None:
+    """Send one minimal request so a bad endpoint or model fails fast."""
+    url = settings["base_url"] + "/chat/completions"
+    payload = {
+        "model": settings["model"],
+        "messages": [{"role": "user", "content": "reply with OK"}],
+        "max_tokens": 16,
+    }
+    headers = {
+        "Authorization": "Bearer " + settings["api_key"],
+        "Content-Type": "application/json",
+    }
+    try:
+        response = httpx.post(url, headers=headers, json=payload, timeout=60)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"无法连接 LLM 端点 {url}：{exc}") from exc
+    if response.status_code == 404:
+        raise RuntimeError(
+            f"端点 {url} 返回 404：通常表示 LLM_MODEL 的值 {settings['model']!r} 不被该服务端接受。"
+            "请核对模型名（NVIDIA NIM 可用模型见 /v1/models 列表）。"
+        )
+    if response.status_code == 410:
+        raise RuntimeError(f"端点 {url} 返回 410：模型 {settings['model']!r} 已下线。")
+    if response.status_code in (401, 403):
+        raise RuntimeError(f"端点 {url} 返回 {response.status_code}：LLM_API_KEY 无效或无该模型权限。")
+    if response.status_code >= 400:
+        raise RuntimeError(f"端点 {url} 返回 {response.status_code}：{response.text[:300]}")
+    print(f"端点与模型可用：{settings['model']} @ {url}")
+
+
 def request_chat_completion(system_prompt: str, user_prompt: str, model: str, base_url: str, api_key: str, timeout: float = 120.0) -> str:
     payload = {
         "model": model,
@@ -224,6 +254,7 @@ def main(argv: list[str]) -> int:
 
     load_env_from_project_root()
     settings = ensure_llm_settings()
+    preflight(settings)
     if args.case:
         to_run = [case for case in CASES if case["id"] == args.case]
     else:

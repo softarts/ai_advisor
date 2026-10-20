@@ -35,8 +35,14 @@ CheckPlugin = Callable[[CheckContext], CheckOutcome]
 
 _CURRENCY = r"(?:USD|SGD|EUR|GBP|CAD|AUD|JPY|CNY|HKD|CHF|NZD|RMB)"
 _NUMBER = r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?"
-_DATE_RE = re.compile(r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?")
+_DATE_RE = re.compile(
+    r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?"
+    r"|\d{4}年\d{1,2}月(?:\d{1,2}日)?"
+    r"|(?<!\d)\d{8}(?!\d)"
+    r"|(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日"
+)
 _LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)、]\s")
+_YEAR_RE = re.compile(r"(?<![\d.])(19|20)\d{2}(?![\d.])")
 _NUMERIC_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<before>{_CURRENCY})?\s*(?P<symbol>[$€£¥])?\s*"
     rf"(?P<number>{_NUMBER})\s*(?P<scale>万|亿|[kKmM])?\s*"
@@ -63,6 +69,9 @@ def _decimal(value: Any) -> Decimal | None:
 def _number_category(path: str, currency: str | None) -> str:
     key = path.lower()
     if any(marker in key for marker in _PP_KEYS):
+        return "pp"
+    # A bare "pp" field name also denotes percentage points.
+    if re.search(r"(?:^|[.\[])\s*pp\s*(?:[.\]]|$)", key):
         return "pp"
     if any(marker in key for marker in _RATIO_KEYS):
         return "ratio"
@@ -104,7 +113,7 @@ def _collect_evidence(value: Any, tool: str, path: str = "$", inherited_currency
                     for date in date_matches
                 ):
                     continue
-                number, category, currency, _ = _parse_number(match)
+                number, category, currency, _, _ = _parse_number(match)
                 path_category = _number_category(path, inherited_currency)
                 if category == "plain" and path_category != "plain":
                     category = path_category
@@ -135,10 +144,36 @@ def _normalize_date(value: str) -> str:
     chinese_date = re.fullmatch(r"(\d{4})年(\d{1,2})月(?:\d{1,2}日)?", value)
     if chinese_date:
         return f"{chinese_date.group(1)}-{int(chinese_date.group(2)):02d}"
+    compact = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", value)
+    if compact:
+        return f"{compact.group(1)}-{compact.group(2)}-{compact.group(3)}"
+    month_day = re.fullmatch(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", value)
+    if month_day:
+        return f"{int(month_day.group(1)):02d}-{int(month_day.group(2)):02d}"
     return value
 
 
-def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal]:
+def _date_matches(answer_date: str, evidence_date: str | None) -> bool:
+    """Match a date written in the answer against a date found in tool output."""
+    if not evidence_date:
+        return False
+    if answer_date == evidence_date:
+        return True
+    # "2025-03" may match "2025-03-31"; "10-09" may match "2026-10-09".
+    if len(answer_date) == 7 and evidence_date.startswith(answer_date + "-"):
+        return True
+    if len(answer_date) == 5 and "-" in evidence_date:
+        month_day = evidence_date.split("-", 1)[1]
+        if month_day == answer_date:
+            return True
+    # A day-level answer ("10 月 9 日") may be covered by month-level evidence
+    # ("2026-10") as long as the month agrees.
+    if len(answer_date) == 5 and len(evidence_date) == 7:
+        return evidence_date.endswith(answer_date)
+    return False
+
+
+def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal, bool]:
     number = Decimal(match.group("number").replace(",", ""))
     scale = (match.group("scale") or "").lower()
     number *= _SCALE.get(scale, Decimal(1))
@@ -158,37 +193,139 @@ def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal]:
     )
     if unit in {"个基点", "bps"}:
         quantum /= Decimal(100)
-    return number, category, currency, quantum
+    explicit_sign = match.group("number").startswith(("+", "-"))
+    return number, category, currency, quantum, explicit_sign
 
 
-def _matches_evidence(number: Decimal, category: str, currency: str | None, quantum: Decimal,
-                      evidence: dict[str, Any]) -> bool:
-    if "value" not in evidence or evidence["category"] != category:
-        return False
-    if currency and evidence.get("currency") != currency:
-        return False
-    value = evidence["value"]
-    if category == "amount" and currency and evidence.get("currency") is None:
-        return False
-    if category in {"ratio", "pp"}:
-        return abs(value).quantize(quantum, rounding=ROUND_HALF_UP) == abs(number).quantize(
-            quantum, rounding=ROUND_HALF_UP
-        )
-    if category == "amount":
+def _same_magnitude(value: Decimal, number: Decimal, quantum: Decimal) -> bool:
+    """Compare magnitudes at the precision the answer actually displayed."""
+    if quantum > 0:
         return abs(value).quantize(quantum, rounding=ROUND_HALF_UP) == abs(number).quantize(
             quantum, rounding=ROUND_HALF_UP
         )
     return abs(value) == abs(number)
 
 
+def _magnitude_matches(number: Decimal, category: str, currency: str | None, quantum: Decimal,
+                       evidence: dict[str, Any]) -> bool:
+    if "value" not in evidence:
+        return False
+    evidence_category = evidence["category"]
+    if currency and evidence.get("currency") != currency:
+        return False
+    value = evidence["value"]
+    if category == "amount" and currency and evidence.get("currency") is None:
+        return False
+    if category == "plain" and evidence_category != "plain":
+        # A number written without a unit ("盈亏 107,932.36") carries no
+        # category of its own; the surrounding prose decides the unit, so it
+        # may ground on a tool value of any category with the same magnitude.
+        if not _same_magnitude(value, number, quantum):
+            return False
+        if evidence_category == "amount" and evidence.get("currency") is None:
+            return False
+        return True
+    if evidence_category != category:
+        # Some tools report a percentage or ratio as a bare number, and the
+        # currency of the account may even be inherited by dimensionless
+        # fields. A "%" in the answer is a unit, not a different magnitude, so
+        # a ratio written by the model may ground on such a tool value.
+        if category == "ratio" and evidence_category in {"plain", "amount"} and _same_magnitude(value, number, quantum):
+            return True
+        return False
+    if category in {"ratio", "pp", "amount"}:
+        return _same_magnitude(value, number, quantum)
+    return abs(value) == abs(number)
+
+
+def _sign_conflicts(number: Decimal, evidence: dict[str, Any]) -> bool:
+    """True when the magnitudes agree but the direction is opposite."""
+    value = evidence.get("value")
+    if not isinstance(value, Decimal) or value == 0 or number == 0:
+        return False
+    return (value > 0) != (number > 0)
+
+
+def _matches_evidence(number: Decimal, category: str, currency: str | None, quantum: Decimal,
+                      evidence: dict[str, Any], explicit_sign: bool) -> bool:
+    if not _magnitude_matches(number, category, currency, quantum, evidence):
+        return False
+    if explicit_sign and _sign_conflicts(number, evidence):
+        return False
+    return True
+
+
+_CITATION_BLOCK_RE = re.compile(r"\n\n数字来源：\n(?:-\s.*\n?)+")
+_INLINE_CITATION_RE = re.compile(r"〔来源：[^〕]*〕")
+
+
+def _strip_prior_annotation(candidate: str) -> str:
+    """Remove annotations added by a previous review pass so re-checking is idempotent."""
+    body = _CITATION_BLOCK_RE.sub("", candidate)
+    body = _INLINE_CITATION_RE.sub("", body)
+    return body.rstrip()
+
+
+def _apply_replacements(text: str, replacements: list[tuple[int, int, str]]) -> str:
+    """Apply non-overlapping span replacements left to right.
+
+    Replacing right to left keeps the original offsets valid, but only when
+    spans do not overlap. Sorting by start and applying left to right is safe
+    for the non-overlapping spans produced here, and skips any span that
+    overlaps an already applied one.
+    """
+    ordered = sorted(replacements, key=lambda item: item[0])
+    result = text
+    offset = 0
+    last_end = -1
+    for start, end, replacement in ordered:
+        if start < last_end:
+            continue
+        result = result[:start + offset] + replacement + result[end + offset:]
+        offset += len(replacement) - (end - start)
+        last_end = end
+    return result
+
+
+def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> list[str]:
+    """Return the numbers in the answer that no tool result supports.
+
+    This is the shared implementation used by both the answer checklist and the
+    evaluation runner, so the two always agree on what counts as grounded.
+    """
+    evidence = _parse_tool_results(tool_results)
+    if not evidence:
+        return []
+    body = _strip_prior_annotation(candidate)
+    dates = list(_DATE_RE.finditer(body))
+    markers = list(_LIST_MARKER_RE.finditer(body))
+    ungrounded: list[str] = []
+    for match in _NUMERIC_RE.finditer(body):
+        if any(match.start() < d.end() and d.start() < match.end() for d in dates):
+            continue
+        if any(match.start() >= m.start() and match.end() <= m.end() for m in markers):
+            continue
+        if _YEAR_RE.fullmatch(match.group("number")):
+            continue
+        number, category, currency, quantum, explicit_sign = _parse_number(match)
+        if not any(
+            _matches_evidence(number, category, currency, quantum, item, explicit_sign)
+            for item in evidence
+        ):
+            ungrounded.append(match.group())
+    return ungrounded
+
+
 def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
     evidence = _parse_tool_results(context.tool_results)
-    date_matches = list(_DATE_RE.finditer(context.candidate))
-    list_markers = list(_LIST_MARKER_RE.finditer(context.candidate))
+    body = _strip_prior_annotation(context.candidate)
+    date_matches = list(_DATE_RE.finditer(body))
+    list_markers = list(_LIST_MARKER_RE.finditer(body))
     matches = [
-        match for match in _NUMERIC_RE.finditer(context.candidate)
+        match for match in _NUMERIC_RE.finditer(body)
         if not any(match.start() < date.end() and date.start() < match.end() for date in date_matches)
         and not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in list_markers)
+        and not _YEAR_RE.fullmatch(match.group("number"))
     ]
     date_matches = [
         match for match in date_matches
@@ -199,10 +336,10 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
     failed_values = []
 
     for match in matches:
-        number, category, currency, quantum = _parse_number(match)
+        number, category, currency, quantum, explicit_sign = _parse_number(match)
         sources = [
             item["source"] for item in evidence
-            if _matches_evidence(number, category, currency, quantum, item)
+            if _matches_evidence(number, category, currency, quantum, item, explicit_sign)
         ]
         source_text = ", ".join(dict.fromkeys(sources)) if sources else "未在工具结果中匹配"
         replacements.append((match.start(), match.end(), f"{match.group()}〔来源：{source_text}〕"))
@@ -214,8 +351,7 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
         date_value = _normalize_date(match.group())
         sources = [
             item["source"] for item in evidence
-            if item.get("date") == date_value
-            or (len(date_value) == 7 and item.get("date", "").startswith(date_value + "-"))
+            if _date_matches(date_value, item.get("date"))
         ]
         source_text = ", ".join(dict.fromkeys(sources)) if sources else "未在工具结果中匹配"
         replacements.append((match.start(), match.end(), f"{match.group()}〔来源：{source_text}〕"))
@@ -223,9 +359,7 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
         if not sources:
             failed_values.append(match.group())
 
-    annotated = context.candidate
-    for start, end, replacement in reversed(replacements):
-        annotated = annotated[:start] + replacement + annotated[end:]
+    annotated = _apply_replacements(body, replacements)
     if citations:
         annotated += "\n\n数字来源：\n" + "\n".join(f"- {item}" for item in citations)
     return CheckOutcome(
@@ -265,7 +399,11 @@ def check_product_policy(context: CheckContext) -> CheckOutcome:
     url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
     response = httpx.post(url, headers=headers, json=payload, timeout=30)
     response.raise_for_status()
-    content = response.json()["choices"][0]["message"].get("content") or ""
+    message = response.json()["choices"][0]["message"]
+    content = message.get("content")
+    if not content:
+        # Reasoning models may return the whole answer in reasoning_content.
+        content = message.get("reasoning_content") or ""
     verdict = parse_review_verdict(content)
     return CheckOutcome(
         passed=verdict["decision"] == "pass",
@@ -281,8 +419,13 @@ CHECK_PLUGINS: dict[str, CheckPlugin] = {
 
 def parse_review_verdict(raw: str) -> dict[str, str]:
     """Validate the reviewer's machine-readable verdict."""
+    from advisor.router import _extract_json_object
+
+    payload_text = _extract_json_object(raw) if raw else None
+    if payload_text is None:
+        raise ValueError("output reviewer returned no JSON object")
     try:
-        result: Any = json.loads(raw)
+        result: Any = json.loads(payload_text)
     except json.JSONDecodeError as exc:
         raise ValueError("output reviewer returned invalid JSON") from exc
 

@@ -593,5 +593,7 @@ class Store:
             raise ValueError("start_month 必须小于或等于 end_month")
         snap_id, account_id = self._current_snap_id(account)
         rows = self.get_portfolio_series(start_month=start_month, end_month=end_month, account=account)
+        report = self.current()
         return {"account_id": account_id, "start_month": start_month, "end_month": end_month,
+                "as_of_date": report.period_end,
                 "observations": rows, "basis": "月末资产价值；月份范围含首尾"}

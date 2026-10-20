@@ -1,0 +1,42 @@
+{
+  "intent": "product_info",
+  "description": "产品与概念说明类用例。检查通用概念解释能力、产品边界声明，以及不得提及 IBKR 以外公司的产品。",
+  "cases": [
+    {
+      "id": "PI01",
+      "name": "系统能力范围",
+      "question": "这个系统能做什么？你能回答哪些关于我账户的问题？",
+      "expected_tools": [],
+      "must_include": [],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "PI02",
+      "name": "通用金融概念：CFD",
+      "question": "什么是 CFD？",
+      "expected_tools": [],
+      "must_include": ["差价合约"],
+      "must_not": ["保证金要求为", "具体杠杆为"],
+      "expect_note": false
+    },
+    {
+      "id": "PI03",
+      "name": "报告覆盖范围与限制",
+      "question": "这份报告覆盖到什么时间？有哪些限制不能回答？",
+      "expected_tools": ["get_capabilities"],
+      "must_include": ["2026-10-09"],
+      "must_not": [],
+      "expect_note": false
+    },
+    {
+      "id": "PI04",
+      "name": "口径术语解释：TWR",
+      "question": "什么是 TWR？PA 口径是什么意思？",
+      "expected_tools": [],
+      "must_include": [],
+      "must_not": [],
+      "expect_note": false
+    }
+  ]
+}
