@@ -51,20 +51,22 @@ flowchart TD
     R -->|product_info\n只传 get_capabilities| L[llm 节点\n按意图加载 compose 模板]
     R -->|data_query\n传递 11 个工具| L
     F --> E[CLI 输出]
-    L -->|文本回答| E
+    L -->|文本回答| C[output_review\n执行意图检查表]
+    C --> E
     L -->|tool call| T[注册工具]
     T --> D[规范数据层 / SQLite]
     D --> T --> L
 ```
 
-Graph 由 `router`、`llm`、`tools` 与 `fixed_reply` 节点组成：
+Graph 由 `router`、`llm`、`tools`、`output_review` 与 `fixed_reply` 节点组成：
 1. **router 节点**：接收用户输入后首先调用 LLM 进行意图识别，将问题分发至 `data_query`、`product_info` 或 `unsupported`。输出经过严格 JSON schema 校验，分类纯基于 LLM 语义判断（无关键词匹配）。若输出异常或 schema 校验失败，安全回退至 `unsupported`。
 2. **意图 Profile 注册表与 compose 模板**：
-   - 每个意图在 `INTENT_PROFILES` 注册表定义了版本号、对应的 compose 模板（位于 `prompts/<intent>.compose.md`）、允许调用的工具列表 (`allowed_tools`) 与策略检查项 (`policy_checks`)。
+   - 每个意图在 `INTENT_PROFILES` 注册表定义了版本号、对应的 compose 模板（位于 `prompts/<intent>.compose.md`）和允许调用的工具列表 (`allowed_tools`)；答案检查列表集中配置于 `advisor/checklist_config.py`。
    - `data_query`（v1.0）：加载 `data_query.compose.md`，允许全量 11 个数据分析工具。已全量迁入单月归因五段式及约束规则，且示例数值均已转换为占位符。
    - `product_info`（v1.0）：加载 `product_info.compose.md`，仅允许 `get_capabilities`，回答系统边界与数据来源等元问题。
    - `unsupported`（v1.0）：直接路由至 `fixed_reply` 节点输出固定友好答复，不调用 LLM 与任何工具。
 3. **llm 节点与 tools 节点**：依据意图加载专属 compose 模板与时区、数据截止日上下文，仅向模型提供对应意图声明的工具 schema；如返回 tool call，执行工具后作为 tool message 回传，直至产出最终答复。
+4. **答案检查**：`advisor/checklist_config.py` 声明全局检查列表、检查器启用状态和每个意图的额外检查列表；检查器实现注册在 `advisor/output_review.py`。检查项可全局禁用，插件可通过新增注册器及意图列表项扩展。当前所有 LLM 意图执行数字与工具结果的来源核对，`product_info` 另执行产品边界审核。任何检查失败或审核异常都会保留候选回答、追加固定警告 note 并记录结构化日志，不以失败回复替换答案。数字来源检查会规范化百分比、百分点及常见金额单位，并为数字添加工具字段引用和文末来源列表。
 
 LangGraph `MemorySaver` 按 thread 保存短期消息；`InMemoryStore` 按 user namespace 保存 `/remember` 明确写入的键值，并在后续模型请求中提供。两者当前均为进程内存，不跨 CLI 重启持久化。
 

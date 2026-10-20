@@ -15,7 +15,8 @@ from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from .tools import execute
-from .output_review import parse_review_verdict
+from .checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
+from .output_review import CHECK_PLUGINS, CheckContext
 from .router import (
     INTENT_PROFILES,
     classify_intent,
@@ -187,17 +188,13 @@ class Advisor:
         from langchain_core.messages import AIMessage
 
         intent = state.get("intent") or ""
-        review_config = load_output_review_config(intent)
-        if review_config is None:
-            return {}
-
         user_message = next(
             (message for message in reversed(state["messages"]) if message.type == "human"),
             None,
         )
         candidate = state["messages"][-1].content
         tool_results = [
-            {"content": message.content}
+            {"tool": getattr(message, "name", None) or "tool", "content": message.content}
             for message in state["messages"]
             if message.type == "tool"
         ]
@@ -207,56 +204,87 @@ class Advisor:
                 "trace_id": self.trace_id,
                 "intent": intent,
             }, ensure_ascii=False))
-            return {"messages": [AIMessage(content=review_config["failure_reply"])]}
+            notice = "⚠️ 答案检查输入不完整，数据准确性无法确认。"
+            safe_candidate = candidate if isinstance(candidate, str) else ""
+            return {"messages": [AIMessage(content=f"{safe_candidate}\n\n{notice}".strip())]}
 
-        try:
-            payload = {
-                "model": os.environ["LLM_MODEL"],
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": review_config["template"] + "\n\n" + review_config["policy"],
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps({
-                            "question": user_message.content,
-                            "candidate_answer": candidate,
-                            "tool_results": tool_results,
-                        }, ensure_ascii=False),
-                    },
-                ],
-                "temperature": 0,
-                "max_tokens": 300,
-            }
-            headers = {
-                "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
-                "Content-Type": "application/json",
-            }
-            url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
-            response = httpx.post(url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"].get("content") or ""
-            verdict = parse_review_verdict(content)
-        except Exception as exc:
+        review_config = load_output_review_config(intent)
+        context = CheckContext(
+            intent=intent,
+            question=user_message.content,
+            candidate=candidate,
+            tool_results=tool_results,
+            logger=self.logger,
+            trace_id=self.trace_id,
+            review_config=review_config,
+        )
+        failed_checks = []
+        if intent not in INTENT_CHECKLISTS:
             self.logger.error(json.dumps({
-                "event": "output_review_error",
+                "event": "output_review_configuration_error",
                 "trace_id": self.trace_id,
                 "intent": intent,
-                "error": str(exc),
+                "error": "intent has no configured checklist",
             }, ensure_ascii=False))
-            return {"messages": [AIMessage(content=review_config["failure_reply"])]}
+            failed_checks.append(("checklist", "答案检查配置缺失，数据准确性无法确认。", "intent has no configured checklist"))
+        for check_id in dict.fromkeys(
+            GLOBAL_CHECKLIST + INTENT_CHECKLISTS.get(intent, [])
+        ):
+            definition = GLOBAL_CHECKS.get(check_id)
+            checker = CHECK_PLUGINS.get(check_id)
+            if definition is None or checker is None:
+                error = f"unknown or unregistered check: {check_id}"
+                self.logger.error(json.dumps({
+                    "event": "output_review_configuration_error",
+                    "trace_id": self.trace_id,
+                    "intent": intent,
+                    "check_id": check_id,
+                    "error": error,
+                }, ensure_ascii=False))
+                failed_checks.append((check_id, definition["failure_note"] if definition else error, error))
+                continue
+            if not definition["enabled"]:
+                continue
+            try:
+                outcome = checker(context)
+                if outcome.candidate is not None:
+                    context.candidate = outcome.candidate
+                if not outcome.passed:
+                    failed_checks.append((check_id, outcome.note or definition["failure_note"], outcome.reason))
+                self.logger.info(json.dumps({
+                    "event": "output_review_check",
+                    "trace_id": self.trace_id,
+                    "intent": intent,
+                    "check_id": check_id,
+                    "passed": outcome.passed,
+                    "reason": outcome.reason,
+                }, ensure_ascii=False))
+            except Exception as exc:
+                self.logger.error(json.dumps({
+                    "event": "output_review_check_error",
+                    "trace_id": self.trace_id,
+                    "intent": intent,
+                    "check_id": check_id,
+                    "error": str(exc),
+                }, ensure_ascii=False))
+                failed_checks.append((check_id, definition["failure_note"], str(exc)))
 
-        self.logger.info(json.dumps({
-            "event": "output_review_result",
+        if not failed_checks and context.candidate == candidate:
+            return {}
+        notes = [note for _, note, _ in failed_checks if note]
+        if failed_checks:
+            context.candidate += "\n\n" + "\n".join(dict.fromkeys(f"⚠️ {note}" for note in notes))
+        self.logger.warning(json.dumps({
+            "event": "output_review_summary",
             "trace_id": self.trace_id,
             "intent": intent,
-            "decision": verdict["decision"],
-            "reason": verdict["reason"],
+            "failed_checks": [
+                {"check_id": check_id, "reason": reason}
+                for check_id, _, reason in failed_checks
+            ],
+            "passed": not failed_checks,
         }, ensure_ascii=False))
-        if verdict["decision"] == "pass":
-            return {}
-        return {"messages": [AIMessage(content=review_config["failure_reply"])]}
+        return {"messages": [AIMessage(content=context.candidate)]}
 
     def _tools(self, state):
         from langchain_core.messages import ToolMessage
@@ -266,7 +294,8 @@ class Advisor:
             self.logger.info(json.dumps({"event": "tool_call", "trace_id": self.trace_id, "tool": tool.name, "arguments": call["args"]}, ensure_ascii=False))
             result = execute(tool, call["args"])
             self.logger.info(json.dumps({"event": "tool_result", "trace_id": self.trace_id, "tool": tool.name, "result": result}, ensure_ascii=False))
-            out.append(ToolMessage(content=json.dumps(result, ensure_ascii=False), tool_call_id=call["id"]))
+            out.append(ToolMessage(content=json.dumps(result, ensure_ascii=False),
+                                   tool_call_id=call["id"], name=tool.name))
         return {"messages": out}
 
     def ask(self, text, thread_id, trace_id=None):

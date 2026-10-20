@@ -28,7 +28,6 @@ import httpx
 #   version          – semver string; bump when the compose template changes
 #   compose_template – filename under prompts/ loaded for the LLM system prompt
 #   allowed_tools    – tool names the LLM may call (empty = no tools passed)
-#   policy_checks    – symbolic tags consumed by _llm; reserved for future hooks
 # ---------------------------------------------------------------------------
 
 INTENT_PROFILES: dict[str, dict[str, Any]] = {
@@ -48,19 +47,16 @@ INTENT_PROFILES: dict[str, dict[str, Any]] = {
             "get_risk_measures",
             "get_open_positions",
         ],
-        "policy_checks": ["require_tool_before_answer", "no_unverified_numbers"],
     },
     "product_info": {
         "version": "1.1",
         "compose_template": "product_info.compose.md",
         "allowed_tools": ["get_capabilities"],
-        "policy_checks": [],
     },
     "unsupported": {
         "version": "1.0",
         "compose_template": "unsupported.compose.md",
         "allowed_tools": [],
-        "policy_checks": [],
     },
 }
 

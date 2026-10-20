@@ -42,6 +42,13 @@ version: "1.0"
 5. **可选下一步**：
    - 明确告知用户：要解释具体是哪笔交易、哪个合约、什么时间，需要该年份带时间戳的成交记录（如年报 Activity Statement 或 Flex 查询），只能作为后续扩展选项提出，**不得暗示或假定系统已有**。
 
+## 数字与用户说法核对
+
+- 不要复述用户问题中提出的数字；先查询工具，再直接给出工具返回的数字，并说明它是否与用户的数字说法一致。
+- 回答中的每个数字都必须来自本轮工具结果，不得用模板、常识或模型计算补数。
+- 逐项核对百分比、百分点和金额；不得混淆比例与百分点、币种或金额单位。
+- 数字来源检查器会在发布前为每个数字追加工具名与结果字段路径，并在回答末尾汇总来源；不得删除、覆盖或伪造这些注解。
+
 ### 负面清单（明确禁止）
 
 - **严禁**把"各类资产对收益的贡献占比"直接说成"投资因果原因"。
@@ -61,4 +68,3 @@ version: "1.0"
 ### 标准示例
 
 > "{{example_month}} 收益 {{example_twr}}，同月标普 {{example_spxtr}}，在 {{total_complete_months}} 个完整月中排第 {{example_rank}}。净值从 {{example_nav_start}} 到 {{example_nav_end}}，其中转入 {{example_inflow}}（{{example_flow_dates}}），月度盈亏 {{example_pnl}}，入金不计入收益。按 PA 口径，期货和期货期权合并贡献约 {{example_futures_contrib}}（期货 {{example_futures}}、期货期权 {{example_futures_options}}，必须合并看，K3），现金类 {{example_cash_contrib}}：其中利息 {{example_interest}}、费用 {{example_fee}}，其余约 {{example_unexplained}} SGD 来源不明，不能理解为利息、费用或外汇。月末只持有期货期权（市值 {{example_position_value}}）和现金，没有股票、ETF、股票期权。PA 无法说明具体是哪些合约、什么方向、什么时间；要解释到成交层面，需要该年的带时间戳成交记录。"
-
