@@ -285,6 +285,10 @@ python eval/runner.py --diagnose
 
 预检失败会直接终止并说明原因，不会让所有用例以"缺少必须包含的内容"的形式失败。
 
+### 模型选择
+
+本项目依赖 tool calling：模型必须能读懂工具 schema 并返回 `tool_calls`。部分 vision-language 变体（如 NVIDIA NIM 的 `nvidia/nemotron-3.5-super-vl-120b-a12b`）在附带工具 schema 时会返回 500，普通对话却正常。已验证可用的非 VL 模型：`nvidia/nemotron-3.5-lightning-30b-a3b`。模型名可用 `GET {LLM_BASE_URL}/models` 查询；注意部分模型会下线（返回 410）或改名（返回 404）。
+
 ### Token 预算
 
 推理模型会先消耗数百 token 做内部推理（项目日志实测 `reasoning_content` 长度 439–730 字符），预算过小会让服务端在生成阶段直接失败并返回 500。因此所有 LLM 调用的 token 上限统一由 `advisor/llm_settings.py` 的 `MAX_COMPLETION_TOKENS` 提供（当前 2048），不要在调用点单独写更小的值。
