@@ -24,7 +24,7 @@ os.environ.setdefault("LLM_BASE_URL", "https://llm.example")
 from advisor.agent import Advisor
 from advisor.tools import create_tools
 from eval.report import CaseResult, evaluate_case, summarize
-from eval.runner import EventCollector, load_cases, _extract_notes
+from eval.runner import EventCollector, load_cases, _extract_notes, _llm_failure_detail
 from pa_analytics import Store
 
 
@@ -88,6 +88,18 @@ class AssertionTests(unittest.TestCase):
         result = self._result(answer="这是因为美元升值导致的。")
         evaluate_case(case, result)
         self.assertTrue(any("禁止出现" in f for f in result.failures))
+
+    def test_interchangeable_phrasings_are_accepted(self):
+        case = {
+            "must_include": [["入金不是收益", "入金不计入收益"]],
+            "expected_tools": [],
+            "check_numbers_grounded": False,
+        }
+        for phrasing in ("入金不是收益，已从盈亏中排除", "入金不计入收益"):
+            with self.subTest(phrasing=phrasing):
+                result = self._result(answer=phrasing)
+                evaluate_case(case, result)
+                self.assertEqual(result.failures, [])
 
     def test_review_failure_is_reported_when_not_expected(self):
         case = {"expected_tools": [], "check_numbers_grounded": False, "expect_note": False}
@@ -257,9 +269,87 @@ class PreflightTests(unittest.TestCase):
             self._preflight(400, body="bad request details")
         self.assertIn("bad request details", str(ctx.exception))
 
+    def test_500_generation_failure_mentions_token_budget(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._preflight(500, body='{"message":"Failed to generate completions"}')
+        message = str(ctx.exception)
+        self.assertIn("500", message)
+        self.assertIn("max_tokens", message)
+
+    def test_preflight_allows_room_for_reasoning_tokens(self):
+        """The preflight cap must exceed the reasoning budget these models use."""
+        from eval import runner as runner_module
+
+        captured = {}
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured.update(json or {})
+            return Response()
+
+        env = {
+            "LLM_API_KEY": "test-key",
+            "LLM_BASE_URL": "https://llm.example/v1",
+            "LLM_MODEL": "test/model",
+        }
+        with patch.dict(os.environ, env), patch("httpx.post", fake_post):
+            runner_module.preflight_llm()
+        self.assertGreaterEqual(captured["max_tokens"], 2048)
+
     def test_success_returns_status_line(self):
         status = self._preflight(200)
         self.assertIn("可用", status)
+
+
+class FailureDetailTests(unittest.TestCase):
+    """A failed run must explain itself, not just say '运行异常'."""
+
+    def _collector(self, events):
+        from eval.runner import EventCollector
+
+        collector = EventCollector()
+
+        class Record(logging.LogRecord):
+            def __init__(self, msg):
+                super().__init__("eval", 20, "", 0, msg, (), None)
+
+        for event in events:
+            collector.emit(Record(json.dumps(event)))
+        return collector
+
+    def test_failure_detail_includes_status_and_body(self):
+        collector = self._collector([
+            {"event": "llm_http_request", "intent": "data_query", "payload": {
+                "model": "test/model", "max_tokens": 2048, "tools": [1] * 11, "messages": [1, 2]}},
+            {"event": "llm_http_response", "status": 500,
+             "body": '{"message":"Failed to generate completions"}'},
+        ])
+        detail = _llm_failure_detail(collector)
+        self.assertIn("500", detail)
+        self.assertIn("Failed to generate completions", detail)
+
+    def test_failure_detail_includes_request_shape(self):
+        collector = self._collector([
+            {"event": "llm_http_request", "intent": "data_query", "payload": {
+                "model": "test/model", "max_tokens": 2048, "tools": [1] * 11, "messages": [1, 2]}},
+            {"event": "llm_http_response", "status": 500, "body": "boom"},
+        ])
+        detail = _llm_failure_detail(collector)
+        self.assertIn("test/model", detail)
+        self.assertIn("tools=11", detail)
+        self.assertIn("max_tokens=2048", detail)
+
+    def test_no_detail_when_all_calls_succeeded(self):
+        collector = self._collector([
+            {"event": "llm_http_response", "status": 200, "body": '{"choices":[]}'},
+        ])
+        self.assertEqual(_llm_failure_detail(collector), "")
 
 
 class RouterParsingTests(unittest.TestCase):

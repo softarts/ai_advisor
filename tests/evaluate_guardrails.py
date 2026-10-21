@@ -17,6 +17,9 @@ from typing import Any, Iterable
 
 import httpx
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from advisor.llm_settings import MAX_COMPLETION_TOKENS
+
 REQUIRED_ENV_VARS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
 
 
@@ -55,7 +58,7 @@ def preflight(settings: dict[str, str]) -> None:
     payload = {
         "model": settings["model"],
         "messages": [{"role": "user", "content": "reply with OK"}],
-        "max_tokens": 16,
+        "max_tokens": MAX_COMPLETION_TOKENS,
     }
     headers = {
         "Authorization": "Bearer " + settings["api_key"],
@@ -75,7 +78,14 @@ def preflight(settings: dict[str, str]) -> None:
     if response.status_code in (401, 403):
         raise RuntimeError(f"端点 {url} 返回 {response.status_code}：LLM_API_KEY 无效或无该模型权限。")
     if response.status_code >= 400:
-        raise RuntimeError(f"端点 {url} 返回 {response.status_code}：{response.text[:300]}")
+        detail = response.text[:300]
+        hint = ""
+        if response.status_code == 500 and "Failed to generate completions" in detail:
+            hint = (
+                " 该错误常由 max_tokens 过小触发：推理模型的 reasoning 阶段会先消耗预算，"
+                "预算过小会让服务端在生成阶段失败。"
+            )
+        raise RuntimeError(f"端点 {url} 返回 {response.status_code}：{detail}{hint}")
     print(f"端点与模型可用：{settings['model']} @ {url}")
 
 
@@ -87,7 +97,7 @@ def request_chat_completion(system_prompt: str, user_prompt: str, model: str, ba
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0,
-        "max_tokens": 1000,
+        "max_tokens": MAX_COMPLETION_TOKENS,
     }
     headers = {
         "Authorization": f"Bearer {api_key}",

@@ -22,6 +22,8 @@ from typing import Any
 
 import httpx
 
+from .llm_settings import MAX_COMPLETION_TOKENS
+
 # ---------------------------------------------------------------------------
 # Intent profile registry
 # ---------------------------------------------------------------------------
@@ -149,7 +151,7 @@ def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | Non
             {"role": "user", "content": user_text},
         ],
         "temperature": 0,
-        "max_tokens": 2000,
+        "max_tokens": MAX_COMPLETION_TOKENS,
     }
     headers = {
         "Authorization": "Bearer " + os.environ["LLM_API_KEY"],

@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 import httpx
 
+from .llm_settings import DEFAULT_TIMEOUT, MAX_COMPLETION_TOKENS
+
 
 @dataclass
 class CheckContext:
@@ -34,20 +36,40 @@ class CheckOutcome:
 CheckPlugin = Callable[[CheckContext], CheckOutcome]
 
 _CURRENCY = r"(?:USD|SGD|EUR|GBP|CAD|AUD|JPY|CNY|HKD|CHF|NZD|RMB)"
+# Models sometimes group digits with a narrow no-break space (U+202F) or
+# other Unicode spaces instead of a comma, and separate date parts with a
+# non-breaking hyphen (U+2011). Both would otherwise split a single figure
+# into several unmatchable fragments.
+_DATE_SEP = r"[-/]"
 _NUMBER = r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?"
 _DATE_RE = re.compile(
-    r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?"
+    rf"\d{{4}}{_DATE_SEP}\d{{1,2}}(?:{_DATE_SEP}\d{{1,2}})?"
     r"|\d{4}年\d{1,2}月(?:\d{1,2}日)?"
     r"|(?<!\d)\d{8}(?!\d)"
     r"|(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日"
 )
 _LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)、]\s")
+# An index inside a path reference ("composition[2].pp") is structural, not a
+# data claim.
+_PATH_INDEX_RE = re.compile(r"\[[\d]+\]")
+# Markdown headings ("### 2. 收益构成") and numbered section titles carry a
+# structural number, not a data claim.
+# The heading number may be followed by punctuation or an emoji decoration
+# ("### 2. 收益构成", "### 2\ufe0f\u20e3 规模与资金").
+_HEADING_MARKER_RE = re.compile(
+    r"(?m)^\s*#{1,6}\s*\d+(?:\.\d+)*[.)]?[^\w\u4e00-\u9fff]*"
+)
 _YEAR_RE = re.compile(r"(?<![\d.])(19|20)\d{2}(?![\d.])")
 _NUMERIC_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<before>{_CURRENCY})?\s*(?P<symbol>[$€£¥])?\s*"
     rf"(?P<number>{_NUMBER})\s*(?P<scale>万|亿|[kKmM])?\s*"
     rf"(?P<after>{_CURRENCY})?\s*(?P<unit>%|％|个百分点|个基点|bps)?(?![A-Za-z0-9])",
     re.IGNORECASE,
+)
+# A grouped figure whose groups are separated by a Unicode space, such as
+# "420<NBSP>878.99", is one number rather than two.
+_GROUPED_NUMBER_RE = re.compile(
+    r"\d{1,3}(?:[   ]\d{3})+(?:\.\d+)?"
 )
 _RATIO_KEYS = ("pct", "percent", "return", "rate", "weight", "volatility")
 _PP_KEYS = ("_pp", "percentage_point")
@@ -197,13 +219,47 @@ def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal, b
     return number, category, currency, quantum, explicit_sign
 
 
+def _significant_digits(number: Decimal) -> int:
+    """Number of significant digits in a value.
+
+    ``normalize()`` drops leading zeros and trailing zeros alike, so the digit
+    count of the normalized value is the number of significant digits.
+    """
+    digits = number.normalize().as_tuple().digits
+    return len(digits) if digits else 1
+
+
 def _same_magnitude(value: Decimal, number: Decimal, quantum: Decimal) -> bool:
-    """Compare magnitudes at the precision the answer actually displayed."""
-    if quantum > 0:
-        return abs(value).quantize(quantum, rounding=ROUND_HALF_UP) == abs(number).quantize(
-            quantum, rounding=ROUND_HALF_UP
-        )
-    return abs(value) == abs(number)
+    """Compare magnitudes at the precision the answer actually displayed.
+
+    The answer may restate the tool value with fewer significant digits,
+    and it may pad the result with trailing zeros ("420,879.00" and "4.50"
+    for tool values of 420878.9896... and 4.4945...). The trailing zeros are
+    formatting, so the comparison uses the answer's effective precision, that
+    is the precision after removing those zeros.
+
+    Two rules keep this from accepting a wrong figure:
+    - the comparison is never coarser than the answer's effective precision,
+      so -5.7% cannot match a tool value of -5.63% by collapsing to -6;
+    - the answer may not claim more significant digits than the tool value
+      carries, so 4.56 does not match a tool value of 4.4945.
+    """
+    if abs(value) == abs(number):
+        return True
+    answer_decimals = max(0, -quantum.as_tuple().exponent)
+    if quantum > 0 and abs(value).quantize(quantum, rounding=ROUND_HALF_UP) == abs(number).quantize(
+        quantum, rounding=ROUND_HALF_UP
+    ):
+        return True
+    # Effective precision of the answer: drop the trailing zeros it padded.
+    effective = abs(number).normalize()
+    effective_decimals = max(0, -effective.as_tuple().exponent)
+    if _significant_digits(number) > _significant_digits(effective):
+        return False
+    scale = Decimal(1).scaleb(-effective_decimals)
+    return abs(value).quantize(scale, rounding=ROUND_HALF_UP) == abs(number).quantize(
+        scale, rounding=ROUND_HALF_UP
+    )
 
 
 def _magnitude_matches(number: Decimal, category: str, currency: str | None, quantum: Decimal,
@@ -231,6 +287,12 @@ def _magnitude_matches(number: Decimal, category: str, currency: str | None, qua
         # fields. A "%" in the answer is a unit, not a different magnitude, so
         # a ratio written by the model may ground on such a tool value.
         if category == "ratio" and evidence_category in {"plain", "amount"} and _same_magnitude(value, number, quantum):
+            return True
+        # Tools report contributions in percentage points ("pp") while the
+        # model may write the same figure with a "%" sign. The magnitude is
+        # the same number, only the unit label differs, so a ratio in the
+        # answer may ground on a pp value and the other way round.
+        if {category, evidence_category} == {"ratio", "pp"} and _same_magnitude(value, number, quantum):
             return True
         return False
     if category in {"ratio", "pp", "amount"}:
@@ -266,6 +328,62 @@ def _strip_prior_annotation(candidate: str) -> str:
     return body.rstrip()
 
 
+_UNICODE_GROUP_SPACE_RE = re.compile(r"(?<=\d)[      ](?=\d{3}(?!\d))")
+_UNICODE_HYPHENS = {
+    "‐": "-", "‑": "-", "‒": "-",
+    "–": "-", "—": "-", "−": "-",
+    "﹘": "-", "－": "-",
+}
+
+
+def _normalize_separators(text: str) -> str:
+    """Rewrite Unicode digit/date separators as ASCII, preserving length.
+
+    Models may group digits with a narrow no-break space ("420 878.99") or
+    separate date parts with a non-breaking hyphen ("2025-03-28"). Left as
+    is, a single figure is parsed as several fragments and never matches the
+    tool value. Every replacement here is one character for one character, so
+    the offsets used for annotating the answer stay valid.
+    """
+    normalized = _UNICODE_GROUP_SPACE_RE.sub(",", text)
+    for source, target in _UNICODE_HYPHENS.items():
+        normalized = normalized.replace(source, target)
+    return normalized
+
+
+def _structural_markers(text: str) -> list[re.Match]:
+    """Spans whose numbers are structural (list ordinals, heading numbers).
+
+    These carry no data claim, so they must not be treated as ungrounded
+    numbers nor annotated with a source.
+    """
+    return (
+        list(_LIST_MARKER_RE.finditer(text))
+        + list(_HEADING_MARKER_RE.finditer(text))
+        + list(_PATH_INDEX_RE.finditer(text))
+    )
+
+
+def _is_structural_number(match: re.Match, markers: list[re.Match]) -> bool:
+    """True when the matched number is a list ordinal or heading number.
+
+    The numeric pattern can absorb leading whitespace (for example the
+    newline before "2. 收益构成"), so the match span may start before the
+    marker. Compare the position of the digits themselves instead.
+    """
+    digits_start = match.start("number")
+    digits_end = match.end("number")
+    for marker in markers:
+        marker_digits = re.search(r"\d+", marker.group())
+        if marker_digits is None:
+            continue
+        marker_start = marker.start() + marker_digits.start()
+        marker_end = marker.start() + marker_digits.end()
+        if digits_start >= marker_start and digits_end <= marker_end:
+            return True
+    return False
+
+
 def _apply_replacements(text: str, replacements: list[tuple[int, int, str]]) -> str:
     """Apply non-overlapping span replacements left to right.
 
@@ -296,14 +414,14 @@ def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> li
     evidence = _parse_tool_results(tool_results)
     if not evidence:
         return []
-    body = _strip_prior_annotation(candidate)
+    body = _normalize_separators(_strip_prior_annotation(candidate))
     dates = list(_DATE_RE.finditer(body))
-    markers = list(_LIST_MARKER_RE.finditer(body))
+    markers = _structural_markers(body)
     ungrounded: list[str] = []
     for match in _NUMERIC_RE.finditer(body):
         if any(match.start() < d.end() and d.start() < match.end() for d in dates):
             continue
-        if any(match.start() >= m.start() and match.end() <= m.end() for m in markers):
+        if _is_structural_number(match, markers):
             continue
         if _YEAR_RE.fullmatch(match.group("number")):
             continue
@@ -318,18 +436,18 @@ def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> li
 
 def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
     evidence = _parse_tool_results(context.tool_results)
-    body = _strip_prior_annotation(context.candidate)
+    body = _normalize_separators(_strip_prior_annotation(context.candidate))
     date_matches = list(_DATE_RE.finditer(body))
-    list_markers = list(_LIST_MARKER_RE.finditer(body))
+    structural_markers = _structural_markers(body)
     matches = [
         match for match in _NUMERIC_RE.finditer(body)
         if not any(match.start() < date.end() and date.start() < match.end() for date in date_matches)
-        and not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in list_markers)
+        and not _is_structural_number(match, structural_markers)
         and not _YEAR_RE.fullmatch(match.group("number"))
     ]
     date_matches = [
         match for match in date_matches
-        if not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in list_markers)
+        if not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in structural_markers)
     ]
     citations = []
     replacements = []
@@ -390,14 +508,14 @@ def check_product_policy(context: CheckContext) -> CheckOutcome:
             },
         ],
         "temperature": 0,
-        "max_tokens": 300,
+        "max_tokens": MAX_COMPLETION_TOKENS,
     }
     headers = {
         "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
         "Content-Type": "application/json",
     }
     url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
-    response = httpx.post(url, headers=headers, json=payload, timeout=30)
+    response = httpx.post(url, headers=headers, json=payload, timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
     message = response.json()["choices"][0]["message"]
     content = message.get("content")

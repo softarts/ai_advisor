@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from .tools import execute
 from .checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
+from .llm_settings import MAX_COMPLETION_TOKENS
 from .output_review import CHECK_PLUGINS, CheckContext
 from .router import (
     INTENT_PROFILES,
@@ -144,7 +145,8 @@ class Advisor:
 
         # Only pass tools that are permitted for this intent
         allowed_tools = [t for name, t in self.tools.items() if name in allowed_tool_names]
-        payload = {"model": os.environ["LLM_MODEL"], "messages": messages}
+        payload = {"model": os.environ["LLM_MODEL"], "messages": messages,
+                   "max_tokens": MAX_COMPLETION_TOKENS}
         if allowed_tools:
             payload["tools"] = [t.api_schema() for t in allowed_tools]
 
@@ -166,6 +168,19 @@ class Advisor:
                 if attempt == 0:
                     time.sleep(0.5)
                     continue
+                raise
+            except httpx.HTTPStatusError as exc:
+                # Surface the server's own explanation: a 500 from the model
+                # gateway is usually caused by a request-shape problem, and
+                # the response body says which.
+                self.logger.error(json.dumps({
+                    "event": "llm_http_failed",
+                    "trace_id": self.trace_id,
+                    "intent": intent,
+                    "status": exc.response.status_code,
+                    "body": exc.response.text[:2000],
+                    "error": str(exc),
+                }, ensure_ascii=False))
                 raise
         if response is None:
             raise RuntimeError("LLM request did not produce a response")

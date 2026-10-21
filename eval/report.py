@@ -63,7 +63,15 @@ def _content_matches(expected: str, answer: str) -> bool:
     A purely numeric expectation matches any number in the answer whose value
     equals the expected one, so display formatting differences (thousand
     separators, trailing zeros, sign placement) do not cause false failures.
+
+    An expectation may be a list of interchangeable phrasings; any one of them
+    satisfies it.
     """
+    options = expected if isinstance(expected, list) else [expected]
+    return any(_single_content_matches(option, answer) for option in options)
+
+
+def _single_content_matches(expected: str, answer: str) -> bool:
     normalized_answer = _normalize_text(answer)
     if _normalize_text(expected) in normalized_answer:
         return True

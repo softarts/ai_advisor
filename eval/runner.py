@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from advisor.agent import Advisor
+from advisor.llm_settings import MAX_COMPLETION_TOKENS
 from advisor.output_review import CheckContext
 from advisor.tools import create_tools
 from eval.report import CaseResult, evaluate_case, summarize
@@ -66,14 +67,14 @@ def preflight_llm() -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "reply with OK"}],
-        "max_tokens": 16,
+        "max_tokens": MAX_COMPLETION_TOKENS,
     }
     headers = {
         "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
         "Content-Type": "application/json",
     }
     try:
-        response = httpx.post(url, headers=headers, json=payload, timeout=60)
+        response = httpx.post(url, headers=headers, json=payload, timeout=120)
     except httpx.RequestError as exc:
         raise RuntimeError(f"无法连接 LLM 端点 {url}：{exc}") from exc
 
@@ -91,10 +92,68 @@ def preflight_llm() -> str:
             f"端点 {url} 返回 {response.status_code}：LLM_API_KEY 无效或无该模型权限。"
         )
     if response.status_code >= 400:
+        detail = response.text[:300]
+        hint = ""
+        if response.status_code == 500 and "Failed to generate completions" in detail:
+            hint = (
+                " 该错误常由 max_tokens 过小触发：推理模型的 reasoning 阶段会先消耗预算，"
+                "预算过小会让服务端在生成阶段失败。"
+            )
         raise RuntimeError(
-            f"端点 {url} 返回 {response.status_code}：{response.text[:300]}"
+            f"端点 {url} 返回 {response.status_code}：{detail}{hint}"
         )
     return f"端点与模型可用：{model} @ {url}"
+
+
+def preflight_tool_support(attempts: int = 3) -> str:
+    """Check that the configured model can be called with a tool schema.
+
+    Some models answer plain questions but fail the moment a tool schema is
+    attached, and the gateway reports that as an opaque 500. The agent needs
+    tool calling, so this is checked before any case runs.
+
+    The gateway occasionally returns 500 under load, so a transient failure is
+    retried before it is reported as "this model cannot use tools".
+    """
+    import time
+
+    import httpx
+
+    from advisor.tools import create_tools
+    from pa_analytics import Store
+
+    base_url = os.environ["LLM_BASE_URL"].rstrip("/")
+    model = os.environ["LLM_MODEL"]
+    url = base_url + "/chat/completions"
+    headers = {
+        "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
+        "Content-Type": "application/json",
+    }
+    schema = [t.api_schema() for t in create_tools(Store("data/pa.db", "data/raw"))]
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "查 2025-03 的月度明细"}],
+        "tools": schema,
+        "max_tokens": MAX_COMPLETION_TOKENS,
+    }
+    last_status = 0
+    last_body = ""
+    for attempt in range(attempts):
+        try:
+            response = httpx.post(url, headers=headers, json=payload, timeout=120)
+        except httpx.RequestError as exc:
+            last_status, last_body = 0, str(exc)
+        else:
+            if response.status_code < 400:
+                return f"工具调用可用：{model}"
+            last_status, last_body = response.status_code, response.text[:200]
+        if attempt < attempts - 1:
+            time.sleep(1.0)
+    raise RuntimeError(
+        f"模型 {model!r} 无法处理带工具 schema 的请求（HTTP {last_status}）：{last_body}。"
+        "本项目依赖工具调用，请改用支持 tool calling 的模型"
+        "（例如 nvidia/nemotron-3.5-lightning-30b-a3b）。"
+    )
 
 
 def load_cases(case_filter: list[str] | None = None) -> list[dict[str, Any]]:
@@ -138,6 +197,98 @@ def _run_logger() -> tuple[logging.Logger, EventCollector]:
 
 def _events_for(collector: EventCollector, trace_id: str) -> list[dict[str, Any]]:
     return [event for event in collector.events if event.get("trace_id") == trace_id]
+
+
+def _llm_failure_detail(collector: EventCollector) -> str:
+    """Summarize the last failed LLM call: request shape plus response body.
+
+    A 5xx from the model gateway is usually caused by the request shape
+    (model, token cap, tool schema) rather than by the question, so the
+    summary names the request parameters and the server's own message.
+    """
+    request: dict[str, Any] = {}
+    for event in collector.events:
+        if event.get("event") == "llm_http_request":
+            request = event
+    summary = ""
+    if request:
+        payload = request.get("payload") or {}
+        tools = payload.get("tools") or []
+        summary = (
+            f"请求模型={payload.get('model')!r}"
+            f" max_tokens={payload.get('max_tokens')!r}"
+            f" tools={len(tools)}"
+            f" messages={len(payload.get('messages') or [])}"
+            f" intent={request.get('intent')!r}"
+        )
+    for event in reversed(collector.events):
+        if event.get("event") != "llm_http_response":
+            continue
+        status = event.get("status")
+        if isinstance(status, int) and status >= 400:
+            body = str(event.get("body") or "").strip()
+            return f"HTTP {status} {body[:400]}" + (f"\n    {summary}" if summary else "")
+    return summary
+
+
+def diagnose_llm() -> list[str]:
+    """Probe which request feature the endpoint rejects.
+
+    Sends the same question with progressively richer payloads so a 5xx can be
+    attributed to a specific feature (tool schema, token cap, long prompt)
+    rather than guessed at.
+    """
+    import httpx
+
+    from advisor.llm_settings import MAX_COMPLETION_TOKENS
+    from advisor.router import load_compose_template
+    from advisor.tools import create_tools
+    from pa_analytics import Store
+
+    store = Store("data/pa.db", "data/raw")
+    tools = create_tools(store)
+    schema = [t.api_schema() for t in tools]
+    compose = load_compose_template("data_query")
+    question = "为什么 2025-03 收益这么高？"
+
+    url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
+        "Content-Type": "application/json",
+    }
+    model = os.environ["LLM_MODEL"]
+
+    probes = [
+        ("A 纯对话，无 tools", {"model": model, "messages": [
+            {"role": "system", "content": compose},
+            {"role": "user", "content": question},
+        ]}),
+        ("B 纯对话 + max_tokens", {"model": model, "messages": [
+            {"role": "system", "content": compose},
+            {"role": "user", "content": question},
+        ], "max_tokens": MAX_COMPLETION_TOKENS}),
+        ("C 短 system + 11 tools", {"model": model, "messages": [
+            {"role": "user", "content": question},
+        ], "tools": schema, "max_tokens": MAX_COMPLETION_TOKENS}),
+        ("D 完整 system + 11 tools（等同生产）", {"model": model, "messages": [
+            {"role": "system", "content": compose},
+            {"role": "user", "content": question},
+        ], "tools": schema, "max_tokens": MAX_COMPLETION_TOKENS}),
+        ("E 完整 system + 11 tools，不设 max_tokens", {"model": model, "messages": [
+            {"role": "system", "content": compose},
+            {"role": "user", "content": question},
+        ], "tools": schema}),
+    ]
+
+    lines = []
+    for label, payload in probes:
+        try:
+            response = httpx.post(url, headers=headers, json=payload, timeout=120)
+            body = response.text[:220].replace("\n", " ")
+            lines.append(f"{response.status_code}  {label}\n      {body}")
+        except httpx.RequestError as exc:
+            lines.append(f"EXC  {label}\n      {exc}")
+    return lines
 
 
 def _extract_notes(answer: str) -> list[str]:
@@ -209,11 +360,19 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--json-out", help="Write the detailed results as JSON to this path")
     parser.add_argument("--show-answer", action="store_true", help="Print the full answer of every case")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Probe which request feature the endpoint rejects, then exit")
     args = parser.parse_args(argv)
 
     load_env_from_project_root()
     ensure_llm_settings()
+    if args.diagnose:
+        print("端点诊断（逐项加码请求，定位 5xx 来自哪个特性）：")
+        for line in diagnose_llm():
+            print("  " + line)
+        return 0
     print(preflight_llm())
+    print(preflight_tool_support())
 
     from pa_analytics import Store
 
@@ -238,13 +397,14 @@ def main(argv: list[str]) -> int:
         try:
             result = run_case(case, advisor, collector)
         except Exception as exc:
+            detail = _llm_failure_detail(collector)
             result = CaseResult(
                 case_id=case["id"],
                 name=case.get("name", case["id"]),
                 intent=case.get("intent", ""),
                 question=case["question"],
                 answer="",
-                failures=[f"运行异常：{exc}"],
+                failures=[f"运行异常：{exc}" + (f"\n    服务端响应：{detail}" if detail else "")],
             )
         results.append(result)
         print_case_report(result)

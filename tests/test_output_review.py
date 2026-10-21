@@ -401,6 +401,218 @@ class AnnotationReplacementTests(unittest.TestCase):
         self.assertIn("TWR -3.75%〔来源：", candidate)
 
 
+class StructuralNumberTests(unittest.TestCase):
+    """List ordinals and heading numbers are structure, not data claims."""
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "month": "2025-03",
+                    "return": {"twr_pct": 4.494502281},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_markdown_heading_numbers_are_not_flagged(self):
+        outcome = check_numeric_provenance(self._context(
+            "### 2. 收益构成（PA 口径）\n### 3. 边界声明\n收益 +4.49%。"
+        ))
+        self.assertTrue(outcome.passed)
+        self.assertNotIn("未在工具结果中匹配", outcome.candidate)
+        self.assertNotIn("〔来源：未在", outcome.candidate)
+
+    def test_list_ordinals_are_not_flagged(self):
+        outcome = check_numeric_provenance(self._context(
+            "1. 规模与资金\n2. 收益构成\n收益 +4.49%。"
+        ))
+        self.assertTrue(outcome.passed)
+        self.assertNotIn("未在工具结果中匹配", outcome.candidate)
+
+    def test_heading_number_is_not_annotated(self):
+        outcome = check_numeric_provenance(self._context(
+            "### 2. 收益构成\n收益 +4.49%。"
+        ))
+        self.assertNotIn("2〔来源：", outcome.candidate)
+        self.assertIn("### 2. 收益构成", outcome.candidate)
+
+    def test_real_numbers_in_headings_are_still_checked(self):
+        """A heading that states a real figure must still be grounded."""
+        outcome = check_numeric_provenance(self._context(
+            "### 收益 99.99%\n"
+        ))
+        self.assertFalse(outcome.passed)
+
+
+class RoundedValueTests(unittest.TestCase):
+    """A rounded restatement of a tool value must be accepted as grounded."""
+
+    def _check(self, candidate, tool_value, key="nav_opening", currency="SGD"):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({"value": {key: tool_value}, "currency": currency}),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        return check_numeric_provenance(context)
+
+    def test_rounded_amount_with_padded_zeros_is_grounded(self):
+        outcome = self._check("净值 420,879.00 SGD。", 420878.989609007)
+        self.assertTrue(outcome.passed, outcome.reason)
+        self.assertNotIn("未在工具结果中匹配", outcome.candidate)
+
+    def test_exact_amount_is_grounded(self):
+        self.assertTrue(self._check("净值 420,878.99 SGD。", 420878.989609007).passed)
+
+    def test_integer_amount_is_grounded(self):
+        self.assertTrue(self._check("净值 420,879 SGD。", 420878.989609007).passed)
+
+    def test_genuinely_different_amount_is_rejected(self):
+        self.assertFalse(self._check("净值 420,000.00 SGD。", 420878.989609007).passed)
+
+    def test_rounded_ratio_with_padded_zeros_is_grounded(self):
+        outcome = self._check("TWR +4.50%。", 4.494502281, key="twr_pct")
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_ratio_with_extra_precision_is_rejected(self):
+        self.assertFalse(self._check("TWR +4.56%。", 4.494502281, key="twr_pct").passed)
+
+    def test_coarser_ratio_is_grounded(self):
+        self.assertTrue(self._check("TWR +4.5%。", 4.494502281, key="twr_pct").passed)
+
+    def test_different_ratio_is_rejected(self):
+        self.assertFalse(self._check("TWR +4.6%。", 4.494502281, key="twr_pct").passed)
+
+    def test_different_ratio_does_not_match_by_collapse(self):
+        """-5.7% must not match -5.63% by rounding both to the same integer."""
+        self.assertFalse(self._check("SPXTR -5.7%。", -5.634429716, key="spxtr").passed)
+
+
+class UnicodeSeparatorTests(unittest.TestCase):
+    """Models may group digits with Unicode spaces instead of a comma."""
+
+    NBSP = " "
+    HYPHEN = "‑"
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "month": "2025-03",
+                    "nav": {"opening": 420878.989609007, "closing": 499814.690377605},
+                    "flows": {"deposits": 60000.0},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_narrow_no_break_space_grouped_amount_is_one_number(self):
+        outcome = check_numeric_provenance(self._context(
+            f"期初净值 420{self.NBSP}878.99 SGD，期末 499{self.NBSP}814.69 SGD。"
+        ))
+        self.assertTrue(outcome.passed, outcome.reason)
+        self.assertNotIn("未在工具结果中匹配", outcome.candidate)
+
+    def test_narrow_no_break_space_grouped_amount_is_annotated_as_one(self):
+        outcome = check_numeric_provenance(self._context(
+            f"期初净值 420{self.NBSP}878.99 SGD。"
+        ))
+        self.assertIn("420,878.99 SGD〔来源：get_month_detail$.nav.opening〕", outcome.candidate)
+
+    def test_non_breaking_hyphen_date_is_recognised(self):
+        outcome = check_numeric_provenance(self._context(
+            f"日期 2025{self.HYPHEN}03{self.HYPHEN}24。"
+        ))
+        # The date must be read as one value, not split into 2025 / 03 / 24.
+        self.assertIn("2025-03-24", outcome.candidate)
+        self.assertNotIn("2025〔来源：", outcome.candidate)
+
+    def test_normalisation_preserves_length(self):
+        from advisor.output_review import _normalize_separators
+        text = f"420{self.NBSP}878.99 和 2025{self.HYPHEN}03"
+        normalized = _normalize_separators(text)
+        self.assertEqual(len(normalized), len(text))
+        self.assertIn("420,878.99", normalized)
+        self.assertIn("2025-03", normalized)
+
+    def test_emoji_decorated_heading_number_is_structural(self):
+        from advisor.output_review import _HEADING_MARKER_RE
+        for heading in ("### 2. 收益构成", "### 2️⃣ 规模与资金", "## 1️⃣ 事实"):
+            with self.subTest(heading=heading):
+                self.assertTrue(_HEADING_MARKER_RE.search(heading))
+
+    def test_array_index_in_path_reference_is_structural(self):
+        from advisor.output_review import _is_structural_number, _NUMERIC_RE, _structural_markers
+        text = "`composition[2].pp` (note K3)"
+        markers = _structural_markers(text)
+        matches = list(_NUMERIC_RE.finditer(text))
+        self.assertTrue(matches)
+        for match in matches:
+            self.assertTrue(_is_structural_number(match, markers))
+
+
+class PercentagePointCategoryTests(unittest.TestCase):
+    """Tools report percentage points; the model may write the same figure as %."""
+
+    def _check(self, candidate):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "composition": [{"category": "derivatives_merged", "pp": 3.3157367079999998}],
+                    "contribution_pp": {"sum": 4.455070521},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        return check_numeric_provenance(context)
+
+    def test_truncated_percentage_matches_pp_value(self):
+        outcome = self._check("贡献 +3.3157 %。")
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_rounded_percentage_matches_pp_value(self):
+        outcome = self._check("贡献 +3.32 %。")
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_percentage_point_wording_matches_too(self):
+        outcome = self._check("贡献 +3.32 pp。")
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_different_percentage_is_rejected(self):
+        self.assertFalse(self._check("贡献 +3.4 %。").passed)
+
+    def test_significant_digits_counts_normalized_digits(self):
+        from decimal import Decimal
+        from advisor.output_review import _significant_digits
+        self.assertEqual(_significant_digits(Decimal("3.3157367079999998")), 17)
+        self.assertEqual(_significant_digits(Decimal("3.3157")), 5)
+        self.assertEqual(_significant_digits(Decimal("420879.00")), 6)
+
+
 class MultiTurnReviewTests(unittest.TestCase):
     """Tool evidence from earlier turns must still support later answers."""
 
