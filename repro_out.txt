@@ -1,0 +1,27 @@
+=== ungrounded numbers ===
+[' 94\u202f%']
+
+=== rank block in tool result ===
+{"rank": 6, "of": 110}
+
+=== must_include checks ===
+'4.49' -> True
+'-5.63' -> True
+'18,935' -> True
+'60,000' -> True
+'3.3' -> True
+'4,470' -> True
+['入金不是收益', '入金不计入收益'] -> True
+'K3' -> True
+'K13' -> True
+
+=== occurrences of the deposit phrase ===
+' `nav.opening` / `nav.closing` |\n| **当月出入金** | 2025-03-24\u202f:\u202f+30,000\u202fSGD；2025-03-25\u202f:\u202f+30,0'
+'000\u202fSGD | `flows.items.amount` |\n| **扣除出入金后的投资盈亏** | **+18,935.70\u202fSGD** | `profit_sgd`（已不计'
+'8,935.70\u202fSGD** | `profit_sgd`（已不计入 TWR 的入金部分） |\n\n---\n\n### 1️⃣ 事实一句\n\n**2025-03** 的账户 TWR 收益'
+'69\u202fSGD**，绝对增长 **78,935.70\u202fSGD**。\n- **当月出入金** 有两笔存款：30,000\u202fSGD（2025-03-24）+ 30,000\u202fSGD（2025'
+'SGD（2025-03-25），合计 **+60,000\u202fSGD**。\n- **入金不计入收益**：上述 60,000\u202fSGD 已从盈亏与 TWR 中剔除，实际投资盈利为 **18'
+
+=== bold numbered section headings ===
+'**2025-03\u202f收益概览（数据来源：`get_month_detail(month="2025-03〔 来源：get_month_det'
+'**2025-03** 的账户 TWR 收益 **+4.49\u202f%**，而同月标普\u202fSPXTR 为 **-5.63\u202f%**。在系统记录的 **'

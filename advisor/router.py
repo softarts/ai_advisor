@@ -35,7 +35,7 @@ from .llm_settings import MAX_COMPLETION_TOKENS
 
 INTENT_PROFILES: dict[str, dict[str, Any]] = {
     "data_query": {
-        "version": "1.0",
+        "version": "1.1",
         "compose_template": "data_query.compose.md",
         "allowed_tools": [
             "get_capabilities",

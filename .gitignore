@@ -19,3 +19,4 @@ llmclient.py
 # Runtime log files
 logs/
 data/
+.env
