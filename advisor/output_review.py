@@ -47,6 +47,8 @@ _DATE_RE = re.compile(
     r"|\d{4}年\d{1,2}月(?:\d{1,2}日)?"
     r"|(?<!\d)\d{8}(?!\d)"
     r"|(?<!\d)\d{1,2}\s*月\s*\d{1,2}\s*日"
+    # English style: "31 Mar 2025", "30 Apr 2025".
+    r"|(?<!\d)\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}"
 )
 _LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)、]\s")
 # An index inside a path reference ("composition[2].pp") is structural, not a
@@ -68,7 +70,7 @@ _INDEX_NAME_RE = re.compile(
 )
 # Window labels ("YTD、1M、3M、6M、1Y、3Y、5Y") name a period, they are not
 # figures.
-_WINDOW_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,2}[MY]|YTD)(?![A-Za-z0-9])", re.IGNORECASE)
+_WINDOW_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,2}\s*[MY]|YTD)(?![A-Za-z0-9])", re.IGNORECASE)
 # A quoted sample question ("“2023-01 到 2024-06 的收益是多少？”") illustrates
 # what the user may ask; its numbers are not claims about the account.
 _QUOTED_SPAN_RE = re.compile(r"[“「『][^”」』]{0,200}[”」』]")
@@ -198,7 +200,18 @@ def _normalize_date(value: str) -> str:
     month_day = re.fullmatch(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", value)
     if month_day:
         return f"{int(month_day.group(1)):02d}-{int(month_day.group(2)):02d}"
+    english = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})", value)
+    if english:
+        month = _MONTH_NAMES.get(english.group(2)[:3].lower())
+        if month:
+            return f"{english.group(3)}-{month:02d}-{int(english.group(1)):02d}"
     return value
+
+
+_MONTH_NAMES = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
 
 
 def _date_matches(answer_date: str, evidence_date: str | None) -> bool:
