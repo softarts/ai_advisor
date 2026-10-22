@@ -50,16 +50,16 @@ _DATE_RE = re.compile(
     # English style: "31 Mar 2025", "30 Apr 2025".
     r"|(?<!\d)\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}"
 )
-_LIST_MARKER_RE = re.compile(r"(?m)^\s*\d+[.)、]\s")
+_LIST_MARKER_RE = re.compile(r"(?m)^\s*(?:\*{1,2})?\d+(?:\ufe0f\u20e3|[.)、])\s*")
 # An index inside a path reference ("composition[2].pp") is structural, not a
 # data claim.
 _PATH_INDEX_RE = re.compile(r"\[[\d]+\]")
-# Markdown headings ("### 2. 收益构成") and numbered section titles carry a
+# Markdown headings ("### 2. 收益构成", "**5️⃣ 可选下一步**") and numbered section titles carry a
 # structural number, not a data claim.
 # The heading number may be followed by punctuation or an emoji decoration
-# ("### 2. 收益构成", "### 2\ufe0f\u20e3 规模与资金").
+# ("### 2. 收益构成", "### 2\ufe0f\u20e3 规模与资金", "**5️⃣ 可选下一步**").
 _HEADING_MARKER_RE = re.compile(
-    r"(?m)^\s*#{1,6}\s*\d+(?:\.\d+)*[.)]?[^\w\u4e00-\u9fff]*"
+    r"(?m)^\s*(?:#{1,6}\s*|\*{1,2})\d+(?:\.\d+)*(?:\ufe0f\u20e3|[.)])?[^\w\u4e00-\u9fff]*"
 )
 _YEAR_RE = re.compile(r"(?<![\d.])(19|20)\d{2}(?![\d.])")
 # Well-known index names carry a number that is part of the name, not a
