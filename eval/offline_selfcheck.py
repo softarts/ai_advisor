@@ -88,13 +88,13 @@ def build_mocks(case, tools_by_name):
     router = _assistant(json.dumps({"intent": intent, "reason": "测试"}))
     if intent == "product_info":
         responses = []
-        tool = (case.get("expected_tools") or [None])[0]
+        tool = (case.get("expected_tools") or case.get("optional_tools") or [None])[0]
         if tool:
             responses.append(_assistant("", [_tool_call("c1", tool, TOOL_ARGS.get((case["id"], tool), {}))]))
         responses.append(_assistant(MOCK_ANSWERS.get(case["id"], "这是答案。")))
         responses.append(REVIEW_PASS)
         return router, responses
-    tool = (case.get("expected_tools") or [None])[0]
+    tool = (case.get("expected_tools") or case.get("optional_tools") or [None])[0]
     if tool is None:
         return router, [_assistant("这是答案。")]
     args = TOOL_ARGS.get((case["id"], tool), {})
@@ -129,11 +129,11 @@ MOCK_ANSWERS = {
     "DQ03": "期初 532,216.57，期末 713,223.18，资产变化 +181,006.61；净流入 77,000.42，区间投资盈亏 104,006.19，TWR 19.35%。基准 SPXTR 15.50%、EFA 13.17%、VT 15.57%。",
     "DQ04": "2026 YTD TWR 16.73%，SPXTR 15.14%，领先 1.58 个百分点。",
     "DQ05": "YTD 盈亏 +92,088.92。股票/ETF +4,669.06，股票期权 +3,898.15，期货/期货期权/外汇合并 +77,660.39，利息 5,930.28，其他费用 -68.96。",
-    "DQ06": "按自然年 TWR，最好 2023 年 +31.88%，最差 2018 年 -28.16%。",
+    "DQ06": "按自然年 TWR，最好 2023 年 +31.88%，最差 2020 年 -50.96%。",
     "DQ07": "利息 5,930.28，其他费用 -68.96，平均月末现金 592,820.54，隐含年化收益率约 1.29%。",
     "DQ08": "赢家首位 ESM5，+107,932.36；输家首位 SPY，-53,431.09。",
     "DQ09": "最大回撤 65.20%，峰值至谷底 2018-01 至 2020-03，恢复期 75 个月，夏普比率 0.0610。",
-    "DQ10": "截至 2026-10-09，持有 SGD 与 USD 现金及若干 ETF。",
+    "DQ10": "截至 2026-10-09，持有 SGD 与 USD 现金及若干 ETF，以上为市值口径，并非风险口径。",
     "DQ11": "2025-03 TWR +4.49%，同月 SPXTR -5.63%，月度盈亏 18,935.70 SGD，当月入金 60,000.00 SGD，入金不是收益，已从盈亏与 TWR 中排除。期货与期货期权合并贡献约 +3.32 个百分点（K3），现金类未解释 4,470.38 SGD（K13）。",
     "DQ12": "2025-04 TWR -3.75%，各品种贡献与 TWR 不自洽，触发门禁，不提供品种拆分（K3）。",
     "DQ13": "现金类未解释 4,470.38 SGD，来源无法验证，不能理解为利息、费用或外汇（K13）。",

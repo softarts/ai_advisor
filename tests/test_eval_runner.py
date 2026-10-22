@@ -71,6 +71,18 @@ class AssertionTests(unittest.TestCase):
         evaluate_case(case, result)
         self.assertTrue(any("未调用期望工具" in f for f in result.failures))
 
+    def test_optional_tool_may_be_used(self):
+        case = {"expected_tools": [], "optional_tools": ["get_capabilities"]}
+        result = self._result(actual_tools=["get_capabilities"])
+        evaluate_case(case, result)
+        self.assertFalse(any("未期望的工具" in f for f in result.failures))
+
+    def test_optional_tool_may_be_omitted(self):
+        case = {"expected_tools": [], "optional_tools": ["get_capabilities"]}
+        result = self._result(actual_tools=[])
+        evaluate_case(case, result)
+        self.assertFalse(any("未期望的工具" in f for f in result.failures))
+
     def test_unexpected_tool_is_reported(self):
         case = {"expected_tools": ["get_month_detail"]}
         result = self._result(actual_tools=["get_month_detail", "get_capabilities"])
@@ -100,6 +112,49 @@ class AssertionTests(unittest.TestCase):
                 result = self._result(answer=phrasing)
                 evaluate_case(case, result)
                 self.assertEqual(result.failures, [])
+
+    def test_forbidden_phrase_inside_a_negation_is_not_reported(self):
+        case = {
+            "must_not": ["因为美元升值"],
+            "expected_tools": [],
+            "check_numbers_grounded": False,
+        }
+        answer = "不能断言这 1.14 % 是因为美元升值（或利息、外汇变动）。"
+        result = self._result(answer=answer)
+        evaluate_case(case, result)
+        self.assertEqual(result.failures, [])
+
+    def test_forbidden_phrase_in_an_assertion_is_reported(self):
+        case = {
+            "must_not": ["因为美元升值"],
+            "expected_tools": [],
+            "check_numbers_grounded": False,
+        }
+        result = self._result(answer="本期收益确实因为美元升值而上升。")
+        evaluate_case(case, result)
+        self.assertTrue(any("禁止出现" in f for f in result.failures))
+
+    def test_forbidden_phrase_in_a_question_heading_is_not_reported(self):
+        case = {
+            "must_not": ["因为美元升值"],
+            "expected_tools": [],
+            "check_numbers_grounded": False,
+        }
+        answer = "### 是否因为美元升值\n\n现金类 1.14 pp，不可断言为汇率变动。"
+        result = self._result(answer=answer)
+        evaluate_case(case, result)
+        self.assertFalse(any("禁止出现" in f for f in result.failures))
+
+    def test_date_in_an_expectation_does_not_become_a_negative_number(self):
+        """A date must not yield a stray negative that matches the wrong figure."""
+        case = {
+            "must_not": ["最高的是 2022-10"],
+            "expected_tools": [],
+            "check_numbers_grounded": False,
+        }
+        result = self._result(answer="最高是 2025-03，+4.49%，区间 -10.0。")
+        evaluate_case(case, result)
+        self.assertFalse(any("禁止出现" in f for f in result.failures))
 
     def test_review_failure_is_reported_when_not_expected(self):
         case = {"expected_tools": [], "check_numbers_grounded": False, "expect_note": False}
@@ -411,6 +466,37 @@ class RouterParsingTests(unittest.TestCase):
 
     def test_empty_response_falls_back_to_unsupported(self):
         self.assertEqual(self._classify(content=None), "unsupported")
+
+    def test_placeholder_intent_is_rejected(self):
+        from advisor.router import _normalize_intent
+        self.assertIsNone(_normalize_intent("<data_query|product_info|unsupported>"))
+        self.assertIsNone(_normalize_intent("data_query|product_info"))
+        self.assertEqual(_normalize_intent("data_query"), "data_query")
+
+    def test_placeholder_intent_triggers_a_retry(self):
+        """A model copying the prompt placeholder must not silently become unsupported."""
+        from advisor import router as router_module
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def __init__(self, content):
+                self._content = content
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": self._content}}]}
+
+        responses = iter([
+            Response('{"intent": "<data_query|product_info|unsupported>", "reason": "x"}'),
+            Response('{"intent": "product_info", "reason": "ok"}'),
+        ])
+        with patch("advisor.router.httpx.post", side_effect=lambda *a, **k: next(responses)):
+            intent = router_module.classify_intent("q", logging.getLogger("router-test"), "t")
+        self.assertEqual(intent, "product_info")
 
 
 if __name__ == "__main__":

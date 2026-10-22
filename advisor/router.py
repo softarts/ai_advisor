@@ -196,36 +196,60 @@ def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | Non
     return content or ""
 
 
+def _normalize_intent(value: Any) -> str | None:
+    """Return a valid intent name, or None when the value cannot be used.
+
+    Models sometimes copy the format placeholder from the prompt verbatim
+    (``"<data_query|product_info|unsupported>"``). That carries no
+    classification, so it is rejected rather than silently treated as one of
+    the options.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if candidate in _VALID_INTENTS:
+        return candidate
+    if "|" in candidate or candidate.startswith("<"):
+        return None
+    return None
+
+
 def classify_intent(user_text: str, logger: logging.Logger, trace_id: str | None) -> str:
     """Return one of the INTENT_PROFILES keys.
 
     On any LLM error, JSON parse failure, or schema violation, returns
     ``"unsupported"`` so the caller always gets a safe fallback.
     """
-    try:
-        raw = _call_router_llm(user_text, logger, trace_id)
-        payload_text = _extract_json_object(raw)
-        if payload_text is None:
-            raise ValueError("router response contains no JSON object")
+    for attempt in range(2):
+        try:
+            raw = _call_router_llm(user_text, logger, trace_id)
+            payload_text = _extract_json_object(raw)
+            if payload_text is None:
+                raise ValueError("router response contains no JSON object")
 
-        data = json.loads(payload_text)
-        if not isinstance(data, dict):
-            raise ValueError("router response is not a JSON object")
-        intent = data.get("intent")
-        if intent not in _VALID_INTENTS:
-            raise ValueError(f"unknown intent value: {intent!r}")
-        logger.info(json.dumps(
-            {"event": "router_classified", "trace_id": trace_id,
-             "intent": intent, "reason": data.get("reason", "")},
-            ensure_ascii=False,
-        ))
-        return intent
-    except Exception as exc:
-        logger.warning(json.dumps(
-            {"event": "router_fallback_unsupported", "trace_id": trace_id, "error": str(exc)},
-            ensure_ascii=False,
-        ))
-        return "unsupported"
+            data = json.loads(payload_text)
+            if not isinstance(data, dict):
+                raise ValueError("router response is not a JSON object")
+            intent = _normalize_intent(data.get("intent"))
+            if intent is None:
+                raise ValueError(f"unknown intent value: {data.get('intent')!r}")
+            logger.info(json.dumps(
+                {"event": "router_classified", "trace_id": trace_id,
+                 "intent": intent, "reason": data.get("reason", "")},
+                ensure_ascii=False,
+            ))
+            return intent
+        except Exception as exc:
+            logger.warning(json.dumps(
+                {"event": "router_fallback_unsupported", "trace_id": trace_id,
+                 "attempt": attempt + 1, "error": str(exc)},
+                ensure_ascii=False,
+            ))
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            return "unsupported"
+    return "unsupported"
 
 
 def load_compose_template(intent: str) -> str:

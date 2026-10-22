@@ -48,8 +48,16 @@ def _normalize_text(value: str) -> str:
 
 
 def _numbers_in(value: str) -> list[float]:
+    """Extract numbers, ignoring the separators inside dates.
+
+    "2022-10" must not yield 2022 and -10: the hyphen is a date separator,
+    not a sign, and a stray negative number makes a textual expectation match
+    the wrong figure.
+    """
+    text = re.sub(r"\d{4}\s*[-/]\s*\d{1,2}(?:\s*[-/]\s*\d{1,2})?", " ", value)
+    text = re.sub(r"\d{4}年\d{1,2}月(?:\d{1,2}日)?", " ", text)
     numbers = []
-    for match in _NUMBER_RE.finditer(value.replace(",", "")):
+    for match in _NUMBER_RE.finditer(text.replace(",", "")):
         try:
             numbers.append(float(match.group()))
         except ValueError:
@@ -92,9 +100,14 @@ def _assert_tools(case: dict[str, Any], result: CaseResult) -> None:
     for tool in expected:
         if tool not in actual:
             result.failures.append(f"未调用期望工具 {tool}（实际：{actual or '无'}）")
+    # "optional_tools" lists tools the agent may use; calling them is fine,
+    # but a case that only names optional tools does not require any call.
+    optional = list(case.get("optional_tools") or [])
     for tool in actual:
-        if tool not in expected:
+        if tool not in expected and tool not in optional:
             result.failures.append(f"调用了未期望的工具 {tool}")
+    if not expected and optional and not actual:
+        pass
 
 
 def _assert_content(case: dict[str, Any], result: CaseResult) -> None:
@@ -102,8 +115,38 @@ def _assert_content(case: dict[str, Any], result: CaseResult) -> None:
         if not _content_matches(token, result.answer):
             result.failures.append(f"缺少必须包含的内容：{token}")
     for token in case.get("must_not") or []:
-        if _content_matches(token, result.answer):
+        if _content_matches(token, result.answer) and not _only_negated(token, result.answer):
             result.failures.append(f"包含禁止出现的内容：{token}")
+
+
+_NEGATION_MARKERS = ("不能断言", "不可断言", "不计入", "并非", "不是", "无法断言", "不得", "不应",
+                     "不能", "不可", "没有", "无法", "而非", "并不是", "不是由")
+# A question-shaped heading ("### 是否因为美元升值") raises the topic, it does
+# not assert it.
+_QUESTION_MARKERS = ("是否", "是否可能", "会不会", "有没有可能", "能否", "可不可以", "为什么")
+
+
+def _only_negated(token: str, answer: str) -> bool:
+    """True when every occurrence of the token sits inside a negated clause.
+
+    "不能断言这 1.14% 是因为美元升值" states the boundary rather than breaking
+    it, so a plain substring check would report a false failure.
+    """
+    if not isinstance(token, str) or len(token) < 4:
+        return False
+    occurrences = [m.start() for m in re.finditer(re.escape(token), answer)]
+    if not occurrences:
+        return False
+    for start in occurrences:
+        context = answer[max(0, start - 40):start]
+        if any(marker in context for marker in _NEGATION_MARKERS):
+            continue
+        # A heading that asks the question does not assert the answer.
+        heading = answer[max(0, start - 60):start]
+        if any(marker in heading for marker in _QUESTION_MARKERS):
+            continue
+        return False
+    return True
 
 
 def _assert_numbers_grounded(result: CaseResult) -> None:
@@ -116,6 +159,28 @@ def _assert_numbers_grounded(result: CaseResult) -> None:
         return
     for value in ungrounded:
         result.failures.append(f"数字无工具依据：{value}")
+
+
+def classify_grounding_failures(result: CaseResult) -> dict[str, list[str]]:
+    """Split ungrounded numbers into derived and unexplained ones.
+
+    A number that the model derived from tool values (a ratio it computed
+    itself) is a different problem from a number that appears from nowhere;
+    separating them makes the report actionable.
+    """
+    derived: list[str] = []
+    unexplained: list[str] = []
+    for failure in result.failures:
+        if "数字无工具依据" not in failure:
+            continue
+        value = failure.split("：", 1)[1].strip()
+        (derived if _looks_derived(value) else unexplained).append(value)
+    return {"derived": derived, "unexplained": unexplained}
+
+
+def _looks_derived(value: str) -> bool:
+    """Heuristic: a percentage the model computed from amounts it had."""
+    return "%" in value or "个百分点" in value or "pp" in value.lower()
 
 
 def _assert_review(case: dict[str, Any], result: CaseResult) -> None:
@@ -168,14 +233,21 @@ def summarize(results: list[CaseResult]) -> dict[str, Any]:
         if result.passed:
             bucket["passed"] += 1
     failure_reasons: dict[str, int] = {}
+    derived_total = 0
+    unexplained_total = 0
     for result in results:
         for failure in result.failures:
             reason = re.sub(r"[:：].*$", "", failure)
             reason = re.sub(r"\d+(\.\d+)?", "N", reason)
             failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        split = classify_grounding_failures(result)
+        derived_total += len(split["derived"])
+        unexplained_total += len(split["unexplained"])
     return {
         "total": total,
         "passed": passed,
+        "derived_numbers": derived_total,
+        "unexplained_numbers": unexplained_total,
         "pass_rate": round(passed / total * 100, 1) if total else 0.0,
         "by_intent": by_intent,
         "failure_reasons": dict(sorted(failure_reasons.items(), key=lambda kv: -kv[1])),

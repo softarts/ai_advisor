@@ -422,6 +422,9 @@ def main(argv: list[str]) -> int:
         print("失败原因分布:")
         for reason, count in summary["failure_reasons"].items():
             print(f"  {count:>3} x {reason}")
+    if summary["derived_numbers"] or summary["unexplained_numbers"]:
+        print(f"数字溯源: 模型自行推导 {summary['derived_numbers']} 个，"
+              f"无法解释来源 {summary['unexplained_numbers']} 个")
 
     if args.json_out:
         payload = {

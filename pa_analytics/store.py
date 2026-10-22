@@ -558,10 +558,22 @@ class Store:
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def get_open_positions_data(self, account: str | None = None) -> list[dict]:
-        """Data API: Query open positions from table_open_positions."""
+        """Data API: Query open positions from table_open_positions.
+
+        The report's ``value`` column is already expressed in the account's
+        base currency (for example USD cash of 365,251.95 is reported as
+        467,778.17 SGD, and the two cash rows sum to the report total), so
+        ``value_base`` repeats that figure under an explicit name. It lets a
+        reader see that the amount is in the account currency instead of
+        having to infer it from the sibling ``currency`` field.
+        """
         snap_id, _ = self._current_snap_id(account)
         sql = "SELECT as_of_date, instrument, currency, symbol, description, quantity, close_price, value, cost_basis, unrealized, fx_to_base FROM table_open_positions WHERE snapshot_id=?"
-        return [dict(r) for r in self.conn.execute(sql, (snap_id,)).fetchall()]
+        rows = [dict(r) for r in self.conn.execute(sql, (snap_id,)).fetchall()]
+        for row in rows:
+            row["value_base"] = row.get("value")
+            row["unrealized_base"] = row.get("unrealized")
+        return rows
 
     def get_open_positions_summary(self, account: str | None = None) -> dict:
         """Data API: Query aggregated open positions and concentration weights."""

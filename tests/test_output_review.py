@@ -613,6 +613,116 @@ class PercentagePointCategoryTests(unittest.TestCase):
         self.assertEqual(_significant_digits(Decimal("420879.00")), 6)
 
 
+class BaseCurrencyEvidenceTests(unittest.TestCase):
+    """The report states position values in the account currency."""
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_open_positions",
+                "content": json.dumps({
+                    "value": {"positions": [{
+                        "currency": "USD",
+                        "symbol": "USD",
+                        "quantity": 365251.948088,
+                        "value": 467778.169916302,
+                        "value_base": 467778.169916302,
+                    }]},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_base_currency_amount_is_grounded(self):
+        outcome = check_numeric_provenance(self._context("USD 现金折合 467,778.17 SGD。"))
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_base_field_is_labelled_with_the_account_currency(self):
+        outcome = check_numeric_provenance(self._context("467,778.17 SGD。"))
+        self.assertIn("get_open_positions$.value.positions[0].value_base", outcome.candidate)
+
+
+class NonDataNumberTests(unittest.TestCase):
+    """Numbers that are part of a name or a count are not data claims."""
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_window_summary",
+                "content": json.dumps({
+                    "months": ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03",
+                               "2026-04", "2026-05", "2026-06", "2026-07", "2026-08",
+                               "2026-09", "2026-10"],
+                    "twr_pct": 19.35439217791288,
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_index_name_number_is_ignored(self):
+        outcome = check_numeric_provenance(self._context("SPXTR（标普 500 总回报指数）。"))
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_list_length_is_grounded(self):
+        outcome = check_numeric_provenance(self._context("过去 12 个月。"))
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_wrong_count_is_still_flagged(self):
+        outcome = check_numeric_provenance(self._context("过去 99 个月。"))
+        self.assertFalse(outcome.passed)
+
+    def test_fabricated_large_number_is_still_flagged(self):
+        outcome = check_numeric_provenance(self._context("金额 12,345,678。"))
+        self.assertFalse(outcome.passed)
+
+
+class LabelAndExampleNumberTests(unittest.TestCase):
+    """Window labels and quoted sample questions are not data claims."""
+
+    def _context(self, candidate):
+        return CheckContext(
+            intent="data_query",
+            question="q",
+            candidate=candidate,
+            tool_results=[{
+                "tool": "get_capabilities",
+                "content": json.dumps({
+                    "value": {"windows": {"YTD": "ok", "1M": "ok", "3M": "ok", "6M": "ok"},
+                              "period": ["2017-08-10", "2026-10-09"]},
+                    "currency": "SGD",
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+
+    def test_window_labels_are_ignored(self):
+        outcome = check_numeric_provenance(self._context(
+            "可查询的窗口包括 YTD、1M、3M、6M、1Y、3Y、5Y 以及 ALL。"
+        ))
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_numbers_inside_a_quoted_sample_question_are_ignored(self):
+        outcome = check_numeric_provenance(self._context(
+            "例如“2023-01 到 2024-06 的总换手收益是多少？”这类问题。"
+        ))
+        self.assertTrue(outcome.passed, outcome.reason)
+
+    def test_real_figures_outside_quotes_are_still_checked(self):
+        outcome = check_numeric_provenance(self._context("收益为 99.99%。"))
+        self.assertFalse(outcome.passed)
+
+
 class MultiTurnReviewTests(unittest.TestCase):
     """Tool evidence from earlier turns must still support later answers."""
 

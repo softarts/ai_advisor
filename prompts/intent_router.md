@@ -9,11 +9,11 @@
 - 不要因为某个金融概念或产品术语未在本系统中实现，就将其归为 unsupported；如果是请求解释概念，应归为 product_info。
 - 若一个问题同时涉及账户事实和概念解释，优先归为 data_query，由数据助手根据工具结果回答。
 
-输出格式（严格 JSON，不含 Markdown 代码块，不含任何额外文字）：
-{"intent": "<data_query|product_info|unsupported>", "reason": "<一句话说明分类理由>"}
+输出格式（严格 JSON，不含 Markdown 代码块，不含任何额外文字），示例：
+{"intent": "data_query", "reason": "用户询问账户收益，需查询数据"}
 
 规则：
 - 直接输出结果，不输出思考过程、推理过程或思维链。
-- intent 只能是 data_query、product_info、unsupported 三个值之一。
+- intent 字段必须原样填入三个值之一：data_query、product_info 或 unsupported；不要保留尖括号或竖线，不要照抄本说明里的占位符。
 - reason 不超过 50 个汉字或英文单词。
 - 不得在 JSON 以外输出任何内容。

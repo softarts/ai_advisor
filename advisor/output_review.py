@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .llm_settings import DEFAULT_TIMEOUT, MAX_COMPLETION_TOKENS
+from .llm_settings import DEFAULT_TIMEOUT, MAX_REVIEW_TOKENS
 
 
 @dataclass
@@ -60,6 +60,18 @@ _HEADING_MARKER_RE = re.compile(
     r"(?m)^\s*#{1,6}\s*\d+(?:\.\d+)*[.)]?[^\w\u4e00-\u9fff]*"
 )
 _YEAR_RE = re.compile(r"(?<![\d.])(19|20)\d{2}(?![\d.])")
+# Well-known index names carry a number that is part of the name, not a
+# figure: "标普 500", "沪深 300".
+_INDEX_NAME_RE = re.compile(
+    r"(?:标普|标准普尔|道琼斯|纳斯达克|恒生|沪深|中证|日经|德国DAX|富时)"
+    r"\s*\d{2,4}"
+)
+# Window labels ("YTD、1M、3M、6M、1Y、3Y、5Y") name a period, they are not
+# figures.
+_WINDOW_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,2}[MY]|YTD)(?![A-Za-z0-9])", re.IGNORECASE)
+# A quoted sample question ("“2023-01 到 2024-06 的收益是多少？”") illustrates
+# what the user may ask; its numbers are not claims about the account.
+_QUOTED_SPAN_RE = re.compile(r"[“「『][^”」』]{0,200}[”」』]")
 _NUMERIC_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<before>{_CURRENCY})?\s*(?P<symbol>[$€£¥])?\s*"
     rf"(?P<number>{_NUMBER})\s*(?P<scale>万|亿|[kKmM])?\s*"
@@ -102,17 +114,30 @@ def _number_category(path: str, currency: str | None) -> str:
     return "plain"
 
 
-def _collect_evidence(value: Any, tool: str, path: str = "$", inherited_currency: str | None = None):
+def _collect_evidence(value: Any, tool: str, path: str = "$", inherited_currency: str | None = None,
+                      base_currency: str | None = None):
     evidence = []
     if isinstance(value, dict):
         currency = value.get("currency", inherited_currency)
         for key, child in value.items():
             if key == "currency":
                 continue
-            evidence.extend(_collect_evidence(child, tool, f"{path}.{key}", currency))
+            child_path = f"{path}.{key}"
+            # A "*_base" field is already expressed in the account's base
+            # currency, whatever currency its sibling fields use.
+            child_currency = base_currency if key.endswith("_base") else currency
+            evidence.extend(_collect_evidence(child, tool, child_path, child_currency, base_currency))
     elif isinstance(value, list):
+        # The length of a returned list is itself a fact ("过去 12 个月",
+        # "2 次入金"), so it is recorded as evidence.
+        evidence.append({
+            "value": Decimal(len(value)),
+            "currency": None,
+            "category": "count",
+            "source": f"{tool}{path} (length)",
+        })
         for index, child in enumerate(value):
-            evidence.extend(_collect_evidence(child, tool, f"{path}[{index}]", inherited_currency))
+            evidence.extend(_collect_evidence(child, tool, f"{path}[{index}]", inherited_currency, base_currency))
     else:
         number = _decimal(value)
         if number is not None:
@@ -157,7 +182,8 @@ def _parse_tool_results(tool_results: list[dict[str, str]]) -> list[dict[str, An
             value = json.loads(result["content"])
         except (json.JSONDecodeError, TypeError) as exc:
             raise ValueError(f"tool result from {result.get('tool', 'unknown')} is invalid JSON") from exc
-        evidence.extend(_collect_evidence(value, result.get("tool", "tool")))
+        base_currency = value.get("currency") if isinstance(value, dict) else None
+        evidence.extend(_collect_evidence(value, result.get("tool", "tool"), "$", None, base_currency))
     return evidence
 
 
@@ -294,6 +320,10 @@ def _magnitude_matches(number: Decimal, category: str, currency: str | None, qua
         # answer may ground on a pp value and the other way round.
         if {category, evidence_category} == {"ratio", "pp"} and _same_magnitude(value, number, quantum):
             return True
+        # A count ("12 个月", "2 次入金") is written without a unit, so it is
+        # matched against the length of a returned list.
+        if category == "plain" and evidence_category == "count" and abs(value) == abs(number):
+            return True
         return False
     if category in {"ratio", "pp", "amount"}:
         return _same_magnitude(value, number, quantum)
@@ -405,6 +435,15 @@ def _apply_replacements(text: str, replacements: list[tuple[int, int, str]]) -> 
     return result
 
 
+def _excluded_number_spans(body: str) -> list[tuple[int, int]]:
+    """Spans whose numbers are not data claims about the account."""
+    spans = []
+    spans.extend((m.start(), m.end()) for m in _INDEX_NAME_RE.finditer(body))
+    spans.extend((m.start(), m.end()) for m in _WINDOW_LABEL_RE.finditer(body))
+    spans.extend((m.start(), m.end()) for m in _QUOTED_SPAN_RE.finditer(body))
+    return spans
+
+
 def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> list[str]:
     """Return the numbers in the answer that no tool result supports.
 
@@ -417,11 +456,16 @@ def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> li
     body = _normalize_separators(_strip_prior_annotation(candidate))
     dates = list(_DATE_RE.finditer(body))
     markers = _structural_markers(body)
+    excluded = _excluded_number_spans(body)
     ungrounded: list[str] = []
     for match in _NUMERIC_RE.finditer(body):
         if any(match.start() < d.end() and d.start() < match.end() for d in dates):
             continue
+        if any(match.start() < end and start < match.end() for start, end in excluded):
+            continue
         if _is_structural_number(match, markers):
+            continue
+        if any(match.start() < end and start < match.end() for start, end in excluded):
             continue
         if _YEAR_RE.fullmatch(match.group("number")):
             continue
@@ -439,15 +483,18 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
     body = _normalize_separators(_strip_prior_annotation(context.candidate))
     date_matches = list(_DATE_RE.finditer(body))
     structural_markers = _structural_markers(body)
+    excluded = _excluded_number_spans(body)
     matches = [
         match for match in _NUMERIC_RE.finditer(body)
         if not any(match.start() < date.end() and date.start() < match.end() for date in date_matches)
         and not _is_structural_number(match, structural_markers)
+        and not any(match.start() < end and start < match.end() for start, end in excluded)
         and not _YEAR_RE.fullmatch(match.group("number"))
     ]
     date_matches = [
         match for match in date_matches
         if not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in structural_markers)
+        and not any(match.start() < end and start < match.end() for start, end in excluded)
     ]
     citations = []
     replacements = []
@@ -508,7 +555,7 @@ def check_product_policy(context: CheckContext) -> CheckOutcome:
             },
         ],
         "temperature": 0,
-        "max_tokens": MAX_COMPLETION_TOKENS,
+        "max_tokens": MAX_REVIEW_TOKENS,
     }
     headers = {
         "Authorization": "Bearer " + os.environ["LLM_API_KEY"],
