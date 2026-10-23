@@ -9,3 +9,4 @@ General, project-independent Agent development practices are documented in `skil
 - Preserve source files and import metadata so normalized records can be traced to their origin.
 - Do not inspect `data/Activity_Statement_1Y.csv` unless the user explicitly asks.
 - Keep verification proportional; use smoke tests for end-to-end behavior unless the user requests more.
+- Before changing intent response templates, answer boundaries, output checks, or their evaluations, read and follow `solution_design.md`. Keep templates at the semantic-contract level; do not bind them to concrete tool names, signatures, or result fields. Update the design document when the contract changes.
