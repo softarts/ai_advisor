@@ -103,11 +103,26 @@
     },
     {
       "id": "DQ12",
-      "name": "单月归因：自洽门禁生效",
+      "name": "单月归因：解释归因数据不一致",
       "question": "为什么 2025-04 亏损？",
       "expected_tools": ["get_month_detail"],
-      "must_include": ["-3.75", ["不自洽", "自洽门禁未通过", "自洽问题", "不自洽门禁"], "门禁", ["不提供品种拆分", "不提供单品种的拆分", "不提供细品种的拆分", "不提供品种"], "K3"],
-      "must_not": ["股票/ETF 贡献", "股票期权贡献", "期货贡献 +", "期货期权贡献 +"],
+      "must_include": ["-3.75", ["归因类别合计与 TWR 不一致", "归因数据与 TWR 对不上", "类别贡献与账户收益不一致", "归因贡献与 TWR 相差", "品种贡献总计与 TWR 相差", "不一致", "相差", "contribution data does not match TWR"], ["不能据此判断亏损来自哪些类别", "不能据此推断具体是哪类资产导致了亏损", "不能据此断定亏损源于哪些合约或交易", "无法可靠判断哪些类别导致亏损", "不能可靠地用类别数据解释亏损", "不能可靠地告诉我们亏损具体来自哪些资产类别", "不能断定亏损主要来源于哪个具体品类或交易", "无法可靠地把亏损归因于哪个具体品类或交易", "无法从归因数据中确切说明亏损的来源", "无法可靠地告诉你是哪些期货、期权或其他资产导致的亏损", "cannot reliably determine which categories caused the loss"]],
+      "conditional_tool_value_guards": [
+        {
+          "tool": "get_month_detail",
+          "when": {"path": "contribution_pp.consistency", "equals": "inconsistent"},
+          "forbidden_values": [
+            {"path": "contribution_pp.etfs", "labels": ["ETF", "股票/ETF"]},
+            {"path": "contribution_pp.stocks", "labels": ["股票"]},
+            {"path": "contribution_pp.options", "labels": ["股票期权"]},
+            {"path": "contribution_pp.futures", "labels": ["期货"]},
+            {"path": "contribution_pp.futures_options", "labels": ["期货期权", "期货/期权"]},
+            {"path": "contribution_pp.future_style_options", "labels": ["未来风格期权"]},
+            {"path": "contribution_pp.cash", "labels": ["现金类", "现金"]}
+          ]
+        }
+      ],
+      "must_not": ["股票/ETF 贡献", "股票期权贡献", "期货贡献 +", "期货期权贡献 +", "主要是由于市场整体回调", "主要受市场整体回调", "亏损主要是由于市场整体回调", "市场整体回调加上账户内部组合的表现略逊于基准", "主要受期货和合并的期货/期权拖累", "主要受期货和合并的期货/期权"],
       "expect_note": false
     },
     {

@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from .tools import execute
 from .checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
-from .llm_settings import MAX_COMPLETION_TOKENS
+from .llm_settings import MAX_COMPLETION_TOKENS, MAX_TOOL_ANSWER_TOKENS
 from .output_review import CHECK_PLUGINS, CheckContext
 from .router import (
     INTENT_PROFILES,
@@ -29,6 +29,8 @@ from .router import (
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     intent: str   # "data_query" | "product_info" | "unsupported" | ""
+    review_retry_count: int
+    review_repair_request: str
 
 
 class Advisor:
@@ -55,7 +57,11 @@ class Advisor:
         )
         graph.add_conditional_edges("llm", self._route, {"tools": "tools", "review": "output_review"})
         graph.add_edge("tools", "llm")
-        graph.add_edge("output_review", END)
+        graph.add_conditional_edges(
+            "output_review",
+            self._route_review,
+            {"repair": "llm", "done": END},
+        )
         graph.add_edge("fixed_reply", END)
         self.graph = graph.compile(checkpointer=self.checkpointer, store=self.store)
 
@@ -130,6 +136,9 @@ class Advisor:
 
         if memory_text:
             system += "\n用户长期记忆：\n" + memory_text
+        repair_request = state.get("review_repair_request", "")
+        if repair_request:
+            system += "\n\n" + repair_request
 
         messages = [{"role": "system", "content": system}]
         for m in state["messages"]:
@@ -144,9 +153,18 @@ class Advisor:
             messages.append(item)
 
         # Only pass tools that are permitted for this intent
-        allowed_tools = [t for name, t in self.tools.items() if name in allowed_tool_names]
+        # A review repair may only revise the candidate using the current turn's
+        # question and already collected tool results. It must not start a new
+        # retrieval or introduce another calculation path.
+        allowed_tools = ([] if repair_request else
+                         [t for name, t in self.tools.items() if name in allowed_tool_names])
+        max_tokens = (
+            MAX_TOOL_ANSWER_TOKENS
+            if any(isinstance(message, ToolMessage) for message in state["messages"])
+            else MAX_COMPLETION_TOKENS
+        )
         payload = {"model": os.environ["LLM_MODEL"], "messages": messages,
-                   "max_tokens": MAX_COMPLETION_TOKENS}
+                   "max_tokens": max_tokens}
         if allowed_tools:
             payload["tools"] = [t.api_schema() for t in allowed_tools]
 
@@ -194,10 +212,14 @@ class Advisor:
         from langchain_core.messages import AIMessage
         return {"messages": [AIMessage(content=msg.get("content") or "", tool_calls=calls,
                                        additional_kwargs={"reasoning_content": msg["reasoning_content"]}
-                                       if msg.get("reasoning_content") else {})]}
+                                       if msg.get("reasoning_content") else {})],
+                "review_repair_request": ""}
 
     def _route(self, state):
         return "tools" if state["messages"][-1].tool_calls else "review"
+
+    def _route_review(self, state):
+        return "repair" if state.get("review_repair_request") else "done"
 
     def _output_review(self, state):
         from langchain_core.messages import AIMessage
@@ -298,6 +320,28 @@ class Advisor:
                 unavailable_checks.append((check_id, definition["unavailable_note"], str(exc)))
 
         notes = [note for _, note, _ in failed_checks + unavailable_checks if note]
+        numeric_failures = [reason for check_id, _, reason in failed_checks
+                            if check_id == "numeric_provenance"]
+        retry_count = state.get("review_retry_count", 0)
+        if numeric_failures and retry_count < 1:
+            repair_request = (
+                "数字溯源复核发现以下金额或比率没有本轮工具结果的直接依据："
+                + "；".join(numeric_failures)
+                + "。请修订上一版完整回答：删除这些无依据数字及依赖它们的结论；只保留工具结果直接支持的金额和比率，"
+                  "保持来源精度，不要自行计算、汇总、换算、取整或近似。不得调用工具，不要提及本次复核或输出检查说明。"
+            )
+            self.logger.info(json.dumps({
+                "event": "output_review_repair_requested",
+                "trace_id": self.trace_id,
+                "intent": intent,
+                "retry_count": retry_count + 1,
+                "failed_checks": ["numeric_provenance"],
+                "reasons": numeric_failures,
+            }, ensure_ascii=False))
+            return {
+                "review_retry_count": retry_count + 1,
+                "review_repair_request": repair_request,
+            }
         if notes:
             context.candidate += "\n\n" + "\n".join(dict.fromkeys(f"⚠️ {note}" for note in notes))
         self.logger.info(json.dumps({
@@ -336,7 +380,8 @@ class Advisor:
     def ask(self, text, thread_id, trace_id=None):
         self.trace_id = trace_id
         result = self.graph.invoke(
-            {"messages": [HumanMessage(content=text)], "intent": ""},
+            {"messages": [HumanMessage(content=text)], "intent": "",
+             "review_retry_count": 0, "review_repair_request": ""},
             {"configurable": {"thread_id": thread_id}},
         )
         return result["messages"][-1].content

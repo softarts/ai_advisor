@@ -353,6 +353,12 @@ def print_case_report(result: CaseResult) -> None:
         print(f"  ✗ {failure}")
 
 
+def print_case_answer(result: CaseResult) -> None:
+    print(f"  原始问题: {result.question}")
+    print("  --- 回答 ---")
+    print(result.answer)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Run the evaluation case set against the live agent.")
     parser.add_argument("--case", action="append", help="Run only the given case id (repeatable)")
@@ -409,8 +415,7 @@ def main(argv: list[str]) -> int:
         results.append(result)
         print_case_report(result)
         if args.show_answer:
-            print("  --- 回答 ---")
-            print(result.answer)
+            print_case_answer(result)
 
     summary = summarize(results)
     print("\n" + "=" * 60)

@@ -21,6 +21,10 @@ from advisor.output_review import (
 )
 
 _NUMBER_RE = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+_GUARDED_NUMBER_RE = re.compile(
+    r"(?<![\w])[-+−]?(?:\d{1,3}(?:[, \u00a0\u202f]\d{3})+|\d+)(?:\.\d+)?"
+)
+_GUARDED_NUMBER_CONTEXT = 50
 
 
 @dataclass
@@ -119,6 +123,74 @@ def _assert_content(case: dict[str, Any], result: CaseResult) -> None:
             result.failures.append(f"包含禁止出现的内容：{token}")
 
 
+def _path_value(value: Any, path: str) -> Any:
+    for part in path.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"工具结果缺少字段 {path}")
+        value = value[part]
+    return value
+
+
+def _tool_payloads(result: CaseResult, tool_name: str) -> list[Any]:
+    payloads = []
+    for tool_result in result.tool_results:
+        if tool_result.get("tool") != tool_name:
+            continue
+        try:
+            payloads.append(json.loads(tool_result["content"]))
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"无法解析工具 {tool_name} 的结果：{exc}") from exc
+    return payloads
+
+
+def _numeric_value_matches(text_value: str, expected: float) -> bool:
+    normalized = text_value.replace(",", "").replace(" ", "").replace("\u00a0", "").replace("\u202f", "")
+    normalized = normalized.replace("−", "-")
+    try:
+        actual = float(normalized)
+    except ValueError:
+        return False
+    decimals = len(normalized.rsplit(".", 1)[1]) if "." in normalized else 0
+    return abs(actual - expected) <= (0.5 * (10 ** -decimals) + 1e-9)
+
+
+def _assert_conditional_tool_value_guards(case: dict[str, Any], result: CaseResult) -> None:
+    for guard in case.get("conditional_tool_value_guards") or []:
+        tool_name = guard["tool"]
+        try:
+            payloads = _tool_payloads(result, tool_name)
+            if not payloads:
+                raise ValueError(f"未捕获工具 {tool_name} 的结果")
+            for payload in payloads:
+                condition = guard["when"]
+                if _path_value(payload, condition["path"]) != condition["equals"]:
+                    continue
+                reported_paths: set[str] = set()
+                for forbidden in guard["forbidden_values"]:
+                    if forbidden["path"] in reported_paths:
+                        continue
+                    raw_value = _path_value(payload, forbidden["path"])
+                    if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                        raise ValueError(f"工具字段 {forbidden['path']} 不是数字")
+                    for label in forbidden["labels"]:
+                        for label_match in re.finditer(re.escape(label), result.answer, re.IGNORECASE):
+                            start = max(0, label_match.start() - _GUARDED_NUMBER_CONTEXT)
+                            end = min(len(result.answer), label_match.end() + _GUARDED_NUMBER_CONTEXT)
+                            context = result.answer[start:end]
+                            if any(
+                                _numeric_value_matches(number.group(), float(raw_value))
+                                for number in _GUARDED_NUMBER_RE.finditer(context)
+                            ):
+                                result.failures.append(
+                                    f"归因数据不一致时仍引用类别贡献：{label} "
+                                    f"{raw_value:g}（{forbidden['path']}）"
+                                )
+                                reported_paths.add(forbidden["path"])
+                                break
+        except (KeyError, ValueError) as exc:
+            result.failures.append(f"无法执行条件工具值检查：{exc}")
+
+
 _NEGATION_MARKERS = ("不能断言", "不可断言", "不计入", "并非", "不是", "无法断言", "不得", "不应",
                      "不能", "不可", "没有", "无法", "而非", "并不是", "不是由")
 # A question-shaped heading ("### 是否因为美元升值") raises the topic, it does
@@ -138,7 +210,10 @@ def _only_negated(token: str, answer: str) -> bool:
     if not occurrences:
         return False
     for start in occurrences:
-        context = answer[max(0, start - 40):start]
+        preceding_text = answer[:start]
+        boundaries = list(re.finditer(r"[。！？!?;；\n]|(?<!\d)\.(?!\d)", preceding_text))
+        sentence_start = boundaries[-1].end() if boundaries else 0
+        context = answer[max(sentence_start, start - 40):start]
         if any(marker in context for marker in _NEGATION_MARKERS):
             continue
         # A heading that asks the question does not assert the answer.
@@ -217,6 +292,7 @@ def evaluate_case(case: dict[str, Any], result: CaseResult) -> CaseResult:
         )
     _assert_tools(case, result)
     _assert_content(case, result)
+    _assert_conditional_tool_value_guards(case, result)
     if case.get("check_numbers_grounded", True):
         _assert_numbers_grounded(result)
     _assert_review(case, result)

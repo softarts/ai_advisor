@@ -9,6 +9,10 @@ from __future__ import annotations
 # 500 "Failed to generate completions", so all requests leave generous room.
 MAX_COMPLETION_TOKENS = 2048
 
+# Tool-backed answers include the full report payload in context and need more
+# room for both reasoning and a complete user-facing answer.
+MAX_TOOL_ANSWER_TOKENS = 4096
+
 # The output reviewer reasons over a whole candidate answer, and a reasoning
 # model may spend thousands of tokens before emitting its short JSON verdict.
 # Truncating it leaves ``content`` empty and the verdict unparseable.

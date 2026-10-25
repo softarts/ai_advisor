@@ -5,11 +5,13 @@ These use a mocked LLM so the runner logic (case loading, event capture,
 tool assertion, content assertion, review assertion and reporting) can be
 verified without model calls.
 """
+import io
 import json
 import logging
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,12 +26,37 @@ os.environ.setdefault("LLM_BASE_URL", "https://llm.example")
 from advisor.agent import Advisor
 from advisor.tools import create_tools
 from eval.report import CaseResult, evaluate_case, summarize
-from eval.runner import EventCollector, load_cases, _extract_notes, _llm_failure_detail
+from eval.runner import (
+    EventCollector,
+    load_cases,
+    _extract_notes,
+    _llm_failure_detail,
+    print_case_answer,
+)
 from pa_analytics import Store
 
 
 def _tool_result(tool_name, payload):
     return {"tool": tool_name, "content": json.dumps(payload, ensure_ascii=False)}
+
+
+def _dq12_tool_result(contributions=None):
+    return _tool_result("get_month_detail", {
+        "return": {"twr_pct": -3.75},
+        "contribution_pp": {
+            "consistency": "inconsistent",
+            "etfs": 0.0,
+            "stocks": 0.0,
+            "options": 0.0,
+            "futures": -12.286702847,
+            "futures_options": -16.348891819,
+            "future_style_options": 0.0,
+            "cash": 10.727310563,
+            "sum": -17.908284103,
+            "twr_gap_pp": -14.16149678,
+            **(contributions or {}),
+        },
+    })
 
 
 class CaseLoadingTests(unittest.TestCase):
@@ -46,6 +73,18 @@ class CaseLoadingTests(unittest.TestCase):
     def test_case_filter_selects_single_case(self):
         cases = load_cases(["DQ01"])
         self.assertEqual([case["id"] for case in cases], ["DQ01"])
+
+    def test_answer_prompts_follow_the_user_question_language(self):
+        for prompt_name in ("data_query.compose.md", "product_info.compose.md"):
+            with self.subTest(prompt=prompt_name):
+                prompt = (ROOT / "prompts" / prompt_name).read_text(encoding="utf-8")
+                self.assertIn("使用用户本轮问题的语言作答", prompt)
+
+    def test_data_query_prompt_prioritizes_concise_explanation_when_attribution_is_unavailable(self):
+        prompt = (ROOT / "prompts" / "data_query.compose.md").read_text(encoding="utf-8")
+        self.assertIn("本节优先于下方五段式结构", prompt)
+        self.assertIn("归因类别数据与整体收益对不上", prompt)
+        self.assertIn("不要报告任何类别贡献数字", prompt)
 
 
 class AssertionTests(unittest.TestCase):
@@ -112,6 +151,136 @@ class AssertionTests(unittest.TestCase):
                 result = self._result(answer=phrasing)
                 evaluate_case(case, result)
                 self.assertEqual(result.failures, [])
+
+    def test_dq12_accepts_a_plain_language_explanation_of_attribution_mismatch(self):
+        case = load_cases(["DQ12"])[0]
+        result = self._result(
+            case_id="DQ12",
+            name=case["name"],
+            intent=case["intent"],
+            question=case["question"],
+            answer=(
+                "2025-04 TWR -3.75%。归因类别合计与 TWR 不一致，"
+                "因此不能据此判断亏损来自哪些类别。"
+            ),
+            actual_tools=["get_month_detail"],
+            tool_results=[_dq12_tool_result()],
+            review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+        )
+        evaluate_case(case, result)
+        self.assertEqual(result.failures, [])
+
+    def test_dq12_accepts_the_user_reported_answer_phrasing(self):
+        case = load_cases(["DQ12"])[0]
+        result = self._result(
+            case_id="DQ12",
+            name=case["name"],
+            intent=case["intent"],
+            question=case["question"],
+            answer=(
+                "TWR 为 -3.75%。品种贡献总计与 TWR 相差 -14.16 个百分点，"
+                "超出系统阈值。因自洽检查未通过，不能可靠地告诉我们亏损具体来自哪些资产类别。"
+            ),
+            actual_tools=["get_month_detail"],
+            tool_results=[_dq12_tool_result()],
+            review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+        )
+        evaluate_case(case, result)
+        self.assertFalse(
+            any("缺少必须包含的内容" in failure for failure in result.failures),
+            result.failures,
+        )
+
+    def test_dq12_rejects_unsupported_market_causality_but_accepts_actual_boundary_wording(self):
+        case = load_cases(["DQ12"])[0]
+        result = self._result(
+            case_id="DQ12",
+            name=case["name"],
+            intent=case["intent"],
+            question=case["question"],
+            answer=(
+                "TWR 为 -3.75%。品类贡献总计与 TWR 不一致。"
+                "不能据此断定亏损源于哪些合约或交易。"
+                "亏损主要是由于市场整体回调加上账户内部组合的表现略逊于基准 SPXTR。"
+            ),
+            actual_tools=["get_month_detail"],
+            tool_results=[_dq12_tool_result()],
+            review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+        )
+        evaluate_case(case, result)
+        self.assertFalse(
+            any("缺少必须包含的内容" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertTrue(
+            any("主要是由于市场整体回调" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertTrue(
+            any("账户内部组合的表现略逊于基准" in failure for failure in result.failures),
+            result.failures,
+        )
+
+    def test_dq12_rejects_category_contribution_after_consistency_gate_fails(self):
+        case = load_cases(["DQ12"])[0]
+        answer = (
+            "TWR 为 -3.75%。期货贡献 -12.29 pp，期货/期权合并 -16.35 pp，现金类贡献 +10.73 pp。"
+            "归因类别合计与 TWR 相差 -14.16 个百分点，因此不能据此判断亏损来自哪些类别。"
+            "主要受期货和合并的期货/期权拖累。"
+        )
+        result = self._result(
+            case_id="DQ12",
+            name=case["name"],
+            intent=case["intent"],
+            question=case["question"],
+            answer=answer,
+            actual_tools=["get_month_detail"],
+            tool_results=[_dq12_tool_result()],
+            review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+        )
+        evaluate_case(case, result)
+        self.assertTrue(
+            any("归因数据不一致时仍引用类别贡献：期货 -12.2867" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertTrue(
+            any("归因数据不一致时仍引用类别贡献：现金类 10.7273" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertTrue(
+            any("归因数据不一致时仍引用类别贡献：期货/期权 -16.3489" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertTrue(
+            any("包含禁止出现的内容：主要受期货和合并的期货/期权拖累" in failure for failure in result.failures),
+            result.failures,
+        )
+        self.assertFalse(
+            any("缺少必须包含的内容" in failure for failure in result.failures),
+            result.failures,
+        )
+
+    def test_dq12_does_not_block_unrelated_occurrence_of_contribution_value(self):
+        case = load_cases(["DQ12"])[0]
+        result = self._result(
+            case_id="DQ12",
+            name=case["name"],
+            intent=case["intent"],
+            question=case["question"],
+            answer=(
+                "TWR 为 -3.75%。期货贡献不提供数值。"
+                "归因类别合计与 TWR 不一致，因此不能据此判断亏损来自哪些类别。"
+                "账户现金余额为 10.73 SGD。"
+            ),
+            actual_tools=["get_month_detail"],
+            tool_results=[_dq12_tool_result({"futures": 10.73, "cash": 0.0})],
+            review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+        )
+        evaluate_case(case, result)
+        self.assertFalse(
+            any("归因数据不一致时仍引用类别贡献" in failure for failure in result.failures),
+            result.failures,
+        )
 
     def test_forbidden_phrase_inside_a_negation_is_not_reported(self):
         case = {
@@ -221,6 +390,23 @@ class NoteExtractionTests(unittest.TestCase):
         self.assertEqual(_extract_notes("只有正文。"), [])
 
 
+class AnswerOutputTests(unittest.TestCase):
+    def test_show_answer_prints_original_question_before_answer(self):
+        result = CaseResult(
+            case_id="DQ12",
+            name="case",
+            intent="data_query",
+            question="为什么 2025-04 亏损？",
+            answer="PA 数据不自洽。",
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_case_answer(result)
+        rendered = output.getvalue()
+        self.assertLess(rendered.index(result.question), rendered.index(result.answer))
+        self.assertIn("原始问题:", rendered)
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_counts_pass_rate_and_intents(self):
         results = [
@@ -237,6 +423,44 @@ class SummaryTests(unittest.TestCase):
 
 class AgentIntegrationTests(unittest.TestCase):
     """The runner must observe the agent's real tool calls and review events."""
+
+    def test_tool_result_generation_gets_larger_completion_budget(self):
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        captured = []
+
+        class Response:
+            status_code = 200
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "简短回答。"}}]}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured.append(json)
+            return Response()
+
+        advisor = Advisor([], logging.getLogger("eval-token-budget-test"))
+        inputs = [
+            [HumanMessage(content="问题")],
+            [
+                HumanMessage(content="问题"),
+                ToolMessage(content="工具结果", tool_call_id="call-1"),
+            ],
+        ]
+        with patch("advisor.agent.httpx.post", fake_post):
+            for messages in inputs:
+                advisor._llm({
+                    "intent": "data_query",
+                    "messages": messages,
+                    "review_repair_request": "",
+                })
+
+        self.assertEqual(captured[0]["max_tokens"], 2048)
+        self.assertEqual(captured[1]["max_tokens"], 4096)
 
     def test_tool_calls_and_review_are_captured_from_the_agent(self):
         store = Store("data/pa.db", "data/raw")

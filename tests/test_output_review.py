@@ -355,9 +355,9 @@ class AnnotationIdempotencyTests(unittest.TestCase):
 
 
 class AnnotationReplacementTests(unittest.TestCase):
-    """Overlapping-length annotations must not corrupt the answer text."""
+    """Financial annotations must not corrupt dates or nearby answer text."""
 
-    def test_date_and_number_annotations_do_not_corrupt_text(self):
+    def test_date_is_ignored_and_number_annotation_does_not_corrupt_text(self):
         context = CheckContext(
             intent="data_query",
             question="q",
@@ -374,7 +374,8 @@ class AnnotationReplacementTests(unittest.TestCase):
             trace_id="test-trace",
         )
         outcome = check_numeric_provenance(context)
-        self.assertIn("2025-04〔来源：", outcome.candidate)
+        self.assertIn("2025-04 TWR", outcome.candidate)
+        self.assertNotIn("2025-04〔来源：", outcome.candidate)
         self.assertIn("-3.75%〔来源：", outcome.candidate)
         self.assertIn("触发门禁。", outcome.candidate)
         self.assertNotIn("〕th", outcome.candidate)
@@ -398,6 +399,7 @@ class AnnotationReplacementTests(unittest.TestCase):
         )
         candidate = check_numeric_provenance(context).candidate
         self.assertLess(candidate.index("2025-04"), candidate.index("-3.75%"))
+        self.assertNotIn("2025-04〔来源：", candidate)
         self.assertIn("TWR -3.75%〔来源：", candidate)
 
 
@@ -673,17 +675,20 @@ class NonDataNumberTests(unittest.TestCase):
         outcome = check_numeric_provenance(self._context("SPXTR（标普 500 总回报指数）。"))
         self.assertTrue(outcome.passed, outcome.reason)
 
-    def test_list_length_is_grounded(self):
+    def test_list_length_is_ignored(self):
         outcome = check_numeric_provenance(self._context("过去 12 个月。"))
         self.assertTrue(outcome.passed, outcome.reason)
+        self.assertNotIn("〔来源：", outcome.candidate)
 
-    def test_wrong_count_is_still_flagged(self):
+    def test_wrong_count_is_ignored(self):
         outcome = check_numeric_provenance(self._context("过去 99 个月。"))
-        self.assertFalse(outcome.passed)
+        self.assertTrue(outcome.passed, outcome.reason)
+        self.assertNotIn("〔来源：", outcome.candidate)
 
-    def test_fabricated_large_number_is_still_flagged(self):
+    def test_unmarked_amount_is_ignored(self):
         outcome = check_numeric_provenance(self._context("金额 12,345,678。"))
-        self.assertFalse(outcome.passed)
+        self.assertTrue(outcome.passed, outcome.reason)
+        self.assertNotIn("〔来源：", outcome.candidate)
 
 
 class LabelAndExampleNumberTests(unittest.TestCase):

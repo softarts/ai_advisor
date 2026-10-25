@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
 
+import pycountry
 import httpx
 
 from .llm_settings import DEFAULT_TIMEOUT, MAX_REVIEW_TOKENS
@@ -35,7 +36,43 @@ class CheckOutcome:
 
 CheckPlugin = Callable[[CheckContext], CheckOutcome]
 
-_CURRENCY = r"(?:USD|SGD|EUR|GBP|CAD|AUD|JPY|CNY|HKD|CHF|NZD|RMB)"
+# Build a complete code/name registry from ISO 4217 data rather than a
+# hand-maintained list of a few currencies. Historic codes are retained so
+# older reports can still be checked.
+_CURRENCY_ALIASES: dict[str, set[str]] = {}
+for _currency_entry in pycountry.currencies:
+    _currency_code = _currency_entry.alpha_3.upper()
+    _CURRENCY_ALIASES.setdefault(_currency_code, set()).add(_currency_code)
+    _CURRENCY_ALIASES.setdefault(_currency_entry.name.upper(), set()).add(_currency_code)
+for _alias, _code in {
+    "RMB": "CNY", "人民币": "CNY", "人民币元": "CNY", "美元": "USD",
+    "美金": "USD", "新币": "SGD", "新元": "SGD", "新加坡元": "SGD",
+    "欧元": "EUR", "英镑": "GBP", "日元": "JPY", "港币": "HKD",
+    "港元": "HKD", "台币": "TWD", "新台币": "TWD", "韩元": "KRW",
+    "加元": "CAD", "澳元": "AUD", "新西兰元": "NZD", "瑞郎": "CHF",
+    "令吉": "MYR", "马币": "MYR", "泰铢": "THB", "印度卢比": "INR",
+    "巴基斯坦卢比": "PKR",
+}.items():
+    _CURRENCY_ALIASES.setdefault(_alias, set()).add(_code)
+_ALL_CURRENCY_CODES = {code for codes in _CURRENCY_ALIASES.values() for code in codes}
+def _codes_named(fragment: str) -> set[str]:
+    return {
+        code for alias, codes in _CURRENCY_ALIASES.items()
+        if fragment in alias for code in codes
+    }
+_CURRENCY = "(?:" + "|".join(
+    re.escape(alias) for alias in sorted(_CURRENCY_ALIASES, key=len, reverse=True)
+) + ")"
+_CURRENCY_SYMBOL_CODES = {
+    "€": {"EUR"}, "₹": {"INR"}, "₩": {"KRW"},
+    "₽": {"RUB"}, "₺": {"TRY"}, "₫": {"VND"}, "฿": {"THB"},
+    "₱": {"PHP"}, "₪": {"ILS"}, "₦": {"NGN"}, "₴": {"UAH"},
+    "₵": {"GHS"}, "₡": {"CRC", "SVC"}, "₲": {"PYG"}, "₸": {"KZT"},
+    "₭": {"LAK"}, "₮": {"MNT"}, "₼": {"AZN"}, "₾": {"GEL"},
+    "¥": {"JPY", "CNY"}, "₨": _codes_named("RUPEE") | {"INR", "PKR", "NPR", "LKR"},
+    "$": _codes_named("DOLLAR"),
+    "£": _codes_named("POUND"),
+}
 # Models sometimes group digits with a narrow no-break space (U+202F) or
 # other Unicode spaces instead of a comma, and separate date parts with a
 # non-breaking hyphen (U+2011). Both would otherwise split a single figure
@@ -61,7 +98,6 @@ _PATH_INDEX_RE = re.compile(r"\[[\d]+\]")
 _HEADING_MARKER_RE = re.compile(
     r"(?m)^\s*(?:#{1,6}\s*|\*{1,2})\d+(?:\.\d+)*(?:\ufe0f\u20e3|[.)])?[^\w\u4e00-\u9fff]*"
 )
-_YEAR_RE = re.compile(r"(?<![\d.])(19|20)\d{2}(?![\d.])")
 # Well-known index names carry a number that is part of the name, not a
 # figure: "标普 500", "沪深 300".
 _INDEX_NAME_RE = re.compile(
@@ -75,9 +111,12 @@ _WINDOW_LABEL_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,2}\s*[MY]|YTD)(?![A-Za-z
 # what the user may ask; its numbers are not claims about the account.
 _QUOTED_SPAN_RE = re.compile(r"[“「『][^”」』]{0,200}[”」』]")
 _NUMERIC_RE = re.compile(
-    rf"(?<![A-Za-z0-9])(?P<before>{_CURRENCY})?\s*(?P<symbol>[$€£¥])?\s*"
+    rf"(?<![A-Za-z])(?P<before>{_CURRENCY})?(?![A-Za-z])\s*"
+    rf"(?P<symbol>[$€£¥₹₩₽₺₫฿₱₪₦₴₵₡₲₸₭₮₼₾])?\s*"
     rf"(?P<number>{_NUMBER})\s*(?P<scale>万|亿|[kKmM])?\s*"
-    rf"(?P<after>{_CURRENCY})?\s*(?P<unit>%|％|个百分点|个基点|bps)?(?![A-Za-z0-9])",
+    rf"(?P<after>{_CURRENCY})?(?![A-Za-z])\s*"
+    rf"(?P<symbol_after>[$€£¥₹₩₽₺₫฿₱₪₦₴₵₡₲₸₭₮₼₾])?\s*"
+    rf"(?P<unit>%|％|个百分点|个基点|bps|pp|元|块)?(?![A-Za-z])",
     re.IGNORECASE,
 )
 # A grouped figure whose groups are separated by a Unicode space, such as
@@ -130,14 +169,6 @@ def _collect_evidence(value: Any, tool: str, path: str = "$", inherited_currency
             child_currency = base_currency if key.endswith("_base") else currency
             evidence.extend(_collect_evidence(child, tool, child_path, child_currency, base_currency))
     elif isinstance(value, list):
-        # The length of a returned list is itself a fact ("过去 12 个月",
-        # "2 次入金"), so it is recorded as evidence.
-        evidence.append({
-            "value": Decimal(len(value)),
-            "currency": None,
-            "category": "count",
-            "source": f"{tool}{path} (length)",
-        })
         for index, child in enumerate(value):
             evidence.extend(_collect_evidence(child, tool, f"{path}[{index}]", inherited_currency, base_currency))
     else:
@@ -150,22 +181,13 @@ def _collect_evidence(value: Any, tool: str, path: str = "$", inherited_currency
                 "source": f"{tool}{path}",
             })
         elif isinstance(value, str):
-            date_matches = list(_DATE_RE.finditer(value))
-            for match in date_matches:
-                evidence.append({
-                    "date": _normalize_date(match.group()),
-                    "source": f"{tool}{path}",
-                })
             for match in _NUMERIC_RE.finditer(value):
-                if any(
-                    match.start() < date.end() and date.start() < match.end()
-                    for date in date_matches
-                ):
-                    continue
                 number, category, currency, _, _ = _parse_number(match)
                 path_category = _number_category(path, inherited_currency)
                 if category == "plain" and path_category != "plain":
                     category = path_category
+                if category not in {"ratio", "pp", "amount"}:
+                    continue
                 evidence.append({
                     "value": number,
                     "currency": currency or (
@@ -189,60 +211,25 @@ def _parse_tool_results(tool_results: list[dict[str, str]]) -> list[dict[str, An
     return evidence
 
 
-def _normalize_date(value: str) -> str:
-    value = value.replace("/", "-")
-    chinese_date = re.fullmatch(r"(\d{4})年(\d{1,2})月(?:\d{1,2}日)?", value)
-    if chinese_date:
-        return f"{chinese_date.group(1)}-{int(chinese_date.group(2)):02d}"
-    compact = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", value)
-    if compact:
-        return f"{compact.group(1)}-{compact.group(2)}-{compact.group(3)}"
-    month_day = re.fullmatch(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", value)
-    if month_day:
-        return f"{int(month_day.group(1)):02d}-{int(month_day.group(2)):02d}"
-    english = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})", value)
-    if english:
-        month = _MONTH_NAMES.get(english.group(2)[:3].lower())
-        if month:
-            return f"{english.group(3)}-{month:02d}-{int(english.group(1)):02d}"
-    return value
-
-
-_MONTH_NAMES = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-}
-
-
-def _date_matches(answer_date: str, evidence_date: str | None) -> bool:
-    """Match a date written in the answer against a date found in tool output."""
-    if not evidence_date:
-        return False
-    if answer_date == evidence_date:
-        return True
-    # "2025-03" may match "2025-03-31"; "10-09" may match "2026-10-09".
-    if len(answer_date) == 7 and evidence_date.startswith(answer_date + "-"):
-        return True
-    if len(answer_date) == 5 and "-" in evidence_date:
-        month_day = evidence_date.split("-", 1)[1]
-        if month_day == answer_date:
-            return True
-    # A day-level answer ("10 月 9 日") may be covered by month-level evidence
-    # ("2026-10") as long as the month agrees.
-    if len(answer_date) == 5 and len(evidence_date) == 7:
-        return evidence_date.endswith(answer_date)
-    return False
-
-
 def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal, bool]:
     number = Decimal(match.group("number").replace(",", ""))
     scale = (match.group("scale") or "").lower()
     number *= _SCALE.get(scale, Decimal(1))
     unit = (match.group("unit") or "").lower()
-    currency = (match.group("before") or match.group("after") or "").upper() or None
-    if match.group("symbol") == "$" and currency is None:
-        currency = None
-    category = "pp" if unit in {"个百分点", "个基点", "bps"} else "ratio" if unit in {"%", "％"} else "amount" if currency or scale or match.group("symbol") else "plain"
+    currency_alias = match.group("before") or match.group("after") or ""
+    currency_codes = (_CURRENCY_ALIASES.get(currency_alias.upper())
+                      or _CURRENCY_ALIASES.get(currency_alias) or set())
+    currency = next(iter(currency_codes)) if len(currency_codes) == 1 else None
+    symbol = match.group("symbol") or match.group("symbol_after")
+    if currency is None and symbol:
+        symbol_codes = _CURRENCY_SYMBOL_CODES.get(symbol, set())
+        currency = next(iter(symbol_codes)) if len(symbol_codes) == 1 else None
+    category = (
+        "pp" if unit in {"个百分点", "个基点", "bps", "pp"}
+        else "ratio" if unit in {"%", "％"}
+        else "amount" if currency_alias or symbol or unit in {"元", "块"}
+        else "plain"
+    )
     if unit in {"个基点", "bps"}:
         number /= Decimal(100)
     decimals = len(match.group("number").partition(".")[2])
@@ -256,6 +243,41 @@ def _parse_number(match: re.Match) -> tuple[Decimal, str, str | None, Decimal, b
         quantum /= Decimal(100)
     explicit_sign = match.group("number").startswith(("+", "-"))
     return number, category, currency, quantum, explicit_sign
+
+
+def _possible_currencies(match: re.Match) -> set[str]:
+    """Return the ISO currency codes allowed by an answer-side marker."""
+    alias = match.group("before") or match.group("after") or ""
+    if alias:
+        return (_CURRENCY_ALIASES.get(alias.upper())
+                or _CURRENCY_ALIASES.get(alias) or set())
+    symbol = match.group("symbol") or match.group("symbol_after")
+    if symbol:
+        return _CURRENCY_SYMBOL_CODES.get(symbol, set())
+    if match.group("unit") in {"元", "块"}:
+        # These units are shared by multiple currencies. Let the current
+        # tool results resolve them only when exactly one currency matches.
+        return _ALL_CURRENCY_CODES
+    return set()
+
+
+def _resolve_currency(match: re.Match, number: Decimal, quantum: Decimal,
+                      explicit_sign: bool, evidence: list[dict[str, Any]]) -> str | None:
+    """Resolve aliases and context-dependent symbols against matching amounts."""
+    _, _, currency, _, _ = _parse_number(match)
+    if currency:
+        return currency
+    possible = _possible_currencies(match)
+    if not possible:
+        return None
+    candidates = {
+        item.get("currency") for item in evidence
+        if item.get("category") == "amount"
+        and item.get("currency") in possible
+        and _magnitude_matches(number, "amount", item.get("currency"), quantum, item)
+        and (not explicit_sign or not _sign_conflicts(number, item))
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _significant_digits(number: Decimal) -> int:
@@ -332,10 +354,6 @@ def _magnitude_matches(number: Decimal, category: str, currency: str | None, qua
         # the same number, only the unit label differs, so a ratio in the
         # answer may ground on a pp value and the other way round.
         if {category, evidence_category} == {"ratio", "pp"} and _same_magnitude(value, number, quantum):
-            return True
-        # A count ("12 个月", "2 次入金") is written without a unit, so it is
-        # matched against the length of a returned list.
-        if category == "plain" and evidence_category == "count" and abs(value) == abs(number):
             return True
         return False
     if category in {"ratio", "pp", "amount"}:
@@ -458,7 +476,7 @@ def _excluded_number_spans(body: str) -> list[tuple[int, int]]:
 
 
 def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> list[str]:
-    """Return the numbers in the answer that no tool result supports.
+    """Return ratio and currency-amount figures that no tool result supports.
 
     This is the shared implementation used by both the answer checklist and the
     evaluation runner, so the two always agree on what counts as grounded.
@@ -480,9 +498,14 @@ def ungrounded_numbers(candidate: str, tool_results: list[dict[str, str]]) -> li
             continue
         if any(match.start() < end and start < match.end() for start, end in excluded):
             continue
-        if _YEAR_RE.fullmatch(match.group("number")):
-            continue
         number, category, currency, quantum, explicit_sign = _parse_number(match)
+        if category not in {"ratio", "pp", "amount"}:
+            continue
+        if category == "amount":
+            currency = _resolve_currency(match, number, quantum, explicit_sign, evidence)
+            if currency is None:
+                ungrounded.append(match.group())
+                continue
         if not any(
             _matches_evidence(number, category, currency, quantum, item, explicit_sign)
             for item in evidence
@@ -502,12 +525,7 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
         if not any(match.start() < date.end() and date.start() < match.end() for date in date_matches)
         and not _is_structural_number(match, structural_markers)
         and not any(match.start() < end and start < match.end() for start, end in excluded)
-        and not _YEAR_RE.fullmatch(match.group("number"))
-    ]
-    date_matches = [
-        match for match in date_matches
-        if not any(match.start() >= marker.start() and match.end() <= marker.end() for marker in structural_markers)
-        and not any(match.start() < end and start < match.end() for start, end in excluded)
+        and _parse_number(match)[1] in {"ratio", "pp", "amount"}
     ]
     citations = []
     replacements = []
@@ -515,21 +533,12 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
 
     for match in matches:
         number, category, currency, quantum, explicit_sign = _parse_number(match)
+        if category == "amount":
+            currency = _resolve_currency(match, number, quantum, explicit_sign, evidence)
         sources = [
             item["source"] for item in evidence
+            if currency is not None or category != "amount"
             if _matches_evidence(number, category, currency, quantum, item, explicit_sign)
-        ]
-        source_text = ", ".join(dict.fromkeys(sources)) if sources else "未在工具结果中匹配"
-        replacements.append((match.start(), match.end(), f"{match.group()}〔来源：{source_text}〕"))
-        citations.append(f"{match.group()}：{source_text}")
-        if not sources:
-            failed_values.append(match.group())
-
-    for match in date_matches:
-        date_value = _normalize_date(match.group())
-        sources = [
-            item["source"] for item in evidence
-            if _date_matches(date_value, item.get("date"))
         ]
         source_text = ", ".join(dict.fromkeys(sources)) if sources else "未在工具结果中匹配"
         replacements.append((match.start(), match.end(), f"{match.group()}〔来源：{source_text}〕"))
