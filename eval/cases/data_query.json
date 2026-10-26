@@ -7,8 +7,14 @@
       "name": "过去三年最高/最低收益月份",
       "question": "过去三年哪个月份收益率最高？最低的是哪个月？",
       "expected_tools": ["get_monthly_returns"],
-      "must_include": ["2025-03", "4.49", "2025-05", "-4.02"],
-      "must_not": [["最高的是 2022-10", "最高为 2022-10", "最高月份是 2022-10"]],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_monthly_returns", "path": "value.best_month.month"},
+        {"tool": "get_monthly_returns", "path": "value.best_month.account_return_pct", "label_path": "value.best_month.month"},
+        {"tool": "get_monthly_returns", "path": "value.worst_month.month"},
+        {"tool": "get_monthly_returns", "path": "value.worst_month.account_return_pct", "label_path": "value.worst_month.month"}
+      ],
+      "must_not": [],
       "expect_note": false
     },
     {
@@ -16,7 +22,11 @@
       "name": "指定月份区间月末资产",
       "question": "列出 2026 年 9 月到 10 月的月末资产。",
       "expected_tools": ["get_portfolio_detail"],
-      "must_include": ["707,216", "713,223", "2026-09", "2026-10"],
+      "must_include": ["2026-09", "2026-10"],
+      "tool_value_assertions": [
+        {"tool": "get_portfolio_detail", "path": "observations.0.value", "label_path": "observations.0.term_month"},
+        {"tool": "get_portfolio_detail", "path": "observations.1.value", "label_path": "observations.1.term_month"}
+      ],
       "must_not": [],
       "expect_note": false
     },
@@ -25,8 +35,32 @@
       "name": "一年期资产变化与基准对比",
       "question": "过去一年资产变化多少？和三个基准比如何？",
       "expected_tools": ["get_window_summary"],
-      "must_include": ["532,216", "713,223", ["104,006", "104006"], "19.35", "SPXTR", "EFA", "VT"],
+      "must_include": ["SPXTR", "EFA", "VT"],
+      "tool_value_assertions": [
+        {"tool": "get_window_summary", "path": "value.start_nav", "label": "期初"},
+        {"tool": "get_window_summary", "path": "value.end_nav", "label": "期末"},
+        {"tool": "get_window_summary", "path": "value.profit", "label": "盈亏"},
+        {"tool": "get_window_summary", "path": "value.twr_pct", "label": "TWR"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.SPXTR", "label": "SPXTR"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.EFA", "label": "EFA"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.VT", "label": "VT"}
+      ],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_window_summary",
+          "paths": [
+            "value.start_nav", "value.end_nav", "value.net_flow", "value.profit",
+            "value.twr_pct", "value.benchmark_twr_pct"
+          ]
+        }
+      ],
       "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "compare-window-benchmarks",
+          "criterion": "应清楚回答账户过去一年的资产变化/投资盈亏，并将账户 TWR 与所问的三个基准作正确比较；不得混淆资产变化、净流入和投资收益。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -34,8 +68,24 @@
       "name": "YTD 收益与基准对比",
       "question": "今年收益如何，比标普好吗？",
       "expected_tools": ["get_window_summary"],
-      "must_include": ["16.73", "15.14"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_window_summary", "path": "value.twr_pct", "label": "TWR"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.SPXTR", "label": "SPXTR"}
+      ],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_window_summary",
+          "paths": ["value.twr_pct", "value.benchmark_twr_pct.SPXTR"]
+        }
+      ],
       "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "compare-ytd-return",
+          "criterion": "应正确比较今年账户 TWR 与 SPXTR，并根据工具数据使用正确的领先/落后结论，不得只罗列数字而不回答比较问题。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -43,8 +93,24 @@
       "name": "YTD 资产类别归因",
       "question": "今年的收益主要来自哪些资产类别？",
       "expected_tools": ["get_attribution"],
-      "must_include": ["4,669", "3,898", "5,930", "77,660", "92,088"],
-      "must_not": ["期货贡献", "期货期权贡献", "外汇贡献"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_attribution", "path": "value.buckets.0.amount", "label_path": "value.buckets.0.label"},
+        {"tool": "get_attribution", "path": "value.buckets.1.amount", "label_path": "value.buckets.1.label"},
+        {"tool": "get_attribution", "path": "value.buckets.2.amount", "label_path": "value.buckets.2.label"},
+        {"tool": "get_attribution", "path": "value.buckets.3.amount", "label_path": "value.buckets.3.label"},
+        {"tool": "get_attribution", "path": "value.buckets.4.amount", "label_path": "value.buckets.4.label"}
+      ],
+      "semantic_fact_paths": [
+        {"tool": "get_attribution", "paths": ["value.buckets", "warnings"]}
+      ],
+      "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "attribution-answers-question",
+          "criterion": "回答应依据工具返回的归因数据正确对应类别名称与贡献值，并避免把类别贡献表述为具体交易或确定因果。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -52,8 +118,27 @@
       "name": "年度收益最好/最差",
       "question": "哪一年收益最好、哪一年最差？",
       "expected_tools": ["get_yearly_table"],
-      "must_include": ["2023", "31.88", "2020", "-50.96"],
+      "must_include": [],
+      "tool_extrema_assertions": [
+        {
+          "tool": "get_yearly_table",
+          "list_path": "value",
+          "value_path": "twr_pct",
+          "entity_path": "year",
+          "exclude_if": {"path": "partial", "equals": true},
+          "modes": ["max", "min"]
+        }
+      ],
+      "semantic_fact_paths": [
+        {"tool": "get_yearly_table", "paths": ["value"]}
+      ],
       "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "yearly-extrema-pairing",
+          "criterion": "应把工具数据中最高和最低年度收益分别与正确年份配对；不得只罗列年份和值却配错，也不得把 TWR 与官方收益口径混为一谈。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -61,7 +146,22 @@
       "name": "现金利息与隐含收益率",
       "question": "今年现金利息和隐含收益率是多少？",
       "expected_tools": ["get_cash_interest"],
-      "must_include": ["5,930", ["-68", "-68.96", "68.96"], "592,820", "1.29"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_cash_interest", "path": "value.interest", "label": "利息"},
+        {"tool": "get_cash_interest", "path": "value.other_fees", "label": "费用", "allow_null": true},
+        {"tool": "get_cash_interest", "path": "value.avg_month_end_cash", "label": "现金", "allow_null": true},
+        {"tool": "get_cash_interest", "path": "value.implied_annual_yield_pct", "label": "收益率", "allow_null": true}
+      ],
+      "semantic_fact_paths": [
+        {"tool": "get_cash_interest", "paths": ["value", "warnings"]}
+      ],
+      "semantic_rubric": [
+        {
+          "id": "explain-cash-interest-basis",
+          "criterion": "应回答现金利息和工具可计算的隐含收益率；说明该收益率是基于平均月末现金的近似值，并遵守工具警告。若工具返回收益率为空，应明确说明数据不足而非编造。"
+        }
+      ],
       "must_not": [],
       "expect_note": false
     },
@@ -70,8 +170,23 @@
       "name": "累计盈亏最大合约",
       "question": "历史上盈亏最大的合约是什么？最差的是哪个？",
       "expected_tools": ["get_top_contributors"],
-      "must_include": ["ESM5", "107,932", "SPY", "-53,431"],
-      "must_not": ["按月", "成交月份"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_top_contributors", "path": "value.winners.0.symbol"},
+        {"tool": "get_top_contributors", "path": "value.winners.0.pnl", "label_path": "value.winners.0.symbol"},
+        {"tool": "get_top_contributors", "path": "value.losers.0.symbol"},
+        {"tool": "get_top_contributors", "path": "value.losers.0.pnl", "label_path": "value.losers.0.symbol"}
+      ],
+      "semantic_fact_paths": [
+        {"tool": "get_top_contributors", "paths": ["value.winners.0", "value.losers.0", "warnings"]}
+      ],
+      "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "explain-contributor-time-scope",
+          "criterion": "应准确说明工具返回的是合约级累计盈亏排名，不能将其说成某个具体月份或成交时间段的盈亏。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -79,8 +194,17 @@
       "name": "风险指标：回撤与夏普",
       "question": "最大回撤是多少，恢复情况如何？夏普比率是多少？",
       "expected_tools": ["get_risk_measures"],
-      "must_include": ["65.20", "75", "0.0610"],
-      "must_not": ["日度回撤", "日内回撤"],
+      "must_include": [],
+      "must_not": [],
+      "semantic_fact_paths": [
+        {"tool": "get_risk_measures", "paths": ["value"]}
+      ],
+      "semantic_rubric": [
+        {
+          "id": "risk-measures-coverage",
+          "criterion": "应根据工具返回的风险指标正确报告最大回撤、恢复情况和夏普比率，正确区分每项指标，且说明指标基于月度数据；不得称其为日内或日度回撤。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -88,8 +212,26 @@
       "name": "当前持仓与币种现金",
       "question": "现在的持仓配置和 SGD/USD 现金分别是多少？",
       "expected_tools": ["get_open_positions"],
-      "must_include": ["2026-10-09", "SGD", "USD", "市值口径"],
-      "must_not": ["是风险口径", "杠杆是", "杠杆为"],
+      "must_include": ["SGD", "USD", "市值口径"],
+      "tool_value_assertions": [
+        {"tool": "get_open_positions", "path": "value.positions.0.as_of_date"}
+      ],
+      "must_not": [],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_open_positions",
+          "paths": [
+            "value.positions", "value.market_value_total",
+            "value.asset_class_weights", "value.cash_net_weight_pct", "warnings"
+          ]
+        }
+      ],
+      "semantic_rubric": [
+        {
+          "id": "report-position-currency-boundary",
+          "criterion": "应准确概述工具返回的当前持仓和 SGD/USD 现金数值及对应币种，并明确这是市值口径而非风险敞口；不得混淆外币原值与账户基础币种折算值。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -97,8 +239,31 @@
       "name": "单月归因：收益高的月份",
       "question": "为什么 2025-03 收益这么高？",
       "expected_tools": ["get_month_detail"],
-      "must_include": ["4.49", "-5.63", "18,935", "60,000", "3.3", "4,470", ["入金不是收益", "入金不计入收益"], "K3", "K13"],
-      "must_not": ["因为某笔交易", "因为某合约", "因为买入", "因为卖出", "是 ES 合约"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_month_detail", "path": "return.twr_pct"},
+        {"tool": "get_month_detail", "path": "return.benchmarks_pct.SPXTR"},
+        {"tool": "get_month_detail", "path": "profit_sgd"},
+        {"tool": "get_month_detail", "path": "flows.deposits"},
+        {"tool": "get_month_detail", "path": "contribution_pp.futures_options"},
+        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate"}
+      ],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_month_detail",
+          "paths": [
+            "month", "return", "nav", "flows", "profit_sgd", "contribution_pp",
+            "cash_category", "boundary", "caveats", "warnings"
+          ]
+        }
+      ],
+      "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "monthly-attribution-boundaries",
+          "criterion": "解释高收益时，应区分账户整体收益与类别归因，不得把类别贡献推断为具体交易原因；应正确说明出入金不是投资收益，并遵守工具提供的归因限制。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -106,7 +271,19 @@
       "name": "单月归因：解释归因数据不一致",
       "question": "为什么 2025-04 亏损？",
       "expected_tools": ["get_month_detail"],
-      "must_include": ["-3.75", ["归因类别合计与 TWR 不一致", "归因数据与 TWR 对不上", "类别贡献与账户收益不一致", "归因贡献与 TWR 相差", "品种贡献总计与 TWR 相差", "不一致", "相差", "contribution data does not match TWR"], ["不能据此判断亏损来自哪些类别", "不能据此推断具体是哪类资产导致了亏损", "不能据此断定亏损源于哪些合约或交易", "无法可靠判断哪些类别导致亏损", "不能可靠地用类别数据解释亏损", "不能可靠地告诉我们亏损具体来自哪些资产类别", "不能断定亏损主要来源于哪个具体品类或交易", "无法可靠地把亏损归因于哪个具体品类或交易", "无法从归因数据中确切说明亏损的来源", "无法可靠地告诉你是哪些期货、期权或其他资产导致的亏损", "cannot reliably determine which categories caused the loss"]],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_month_detail", "path": "return.twr_pct"}
+      ],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_month_detail",
+          "paths": [
+            "month", "return", "contribution_pp", "composition_unavailable_reason",
+            "boundary", "caveats", "warnings"
+          ]
+        }
+      ],
       "conditional_tool_value_guards": [
         {
           "tool": "get_month_detail",
@@ -122,7 +299,17 @@
           ]
         }
       ],
-      "must_not": ["股票/ETF 贡献", "股票期权贡献", "期货贡献 +", "期货期权贡献 +", "主要是由于市场整体回调", "主要受市场整体回调", "亏损主要是由于市场整体回调", "市场整体回调加上账户内部组合的表现略逊于基准", "主要受期货和合并的期货/期权拖累", "主要受期货和合并的期货/期权"],
+      "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "identify-attribution-inconsistency",
+          "criterion": "应传达类别归因合计与 TWR 不一致，且因此不能可靠地从类别归因确定亏损来源；表达可使用任意自然措辞。"
+        },
+        {
+          "id": "avoid-unsupported-loss-causality",
+          "criterion": "不得把亏损归因于某个资产类别、具体合约/交易、市场回调或笼统的组合表现，除非工具结果明确支持该因果结论。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -130,18 +317,50 @@
       "name": "单月归因：现金类未解释部分",
       "question": "2025-03 现金类为什么有 1.14 个百分点，是美元升值吗？",
       "expected_tools": ["get_month_detail"],
-      "must_include": [["无法验证", "不能断言", "无法确定", "来源不明"], "4,470", ["未解释", "无法进一步"], "K13"],
-      "must_not": ["因为美元升值", "确实是汇率收益", "美元汇率上涨导致"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate"}
+      ],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_month_detail",
+          "paths": [
+            "month", "cash_category", "boundary", "caveats", "warnings"
+          ]
+        }
+      ],
+      "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "cash-attribution-uncertainty",
+          "criterion": "应说明工具未能验证现金类贡献的具体来源，不得将其断言为美元升值、汇率收益、利息或费用，除非工具事实明确支持。"
+        }
+      ],
       "expect_note": false
     },
     {
       "id": "DQ14",
       "name": "超出报告能力：逐笔成交时间",
       "question": "每月交易笔数是多少？是不是交易太频繁？",
-      "expected_tools": [],
-      "optional_tools": ["get_capabilities"],
-      "must_include": [["无法回答", "无法提供", "不能回答", "暂不提供", "不提供"], "K8"],
-      "must_not": ["到期月份代替成交月份", "用到期月份代理"],
+      "expected_tools": ["get_capabilities"],
+      "optional_tools": [],
+      "must_include": [],
+      "must_not": [],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_capabilities",
+          "paths": [
+            "value.source", "value.period", "value.answerable",
+            "value.answerable_with_caveats", "value.not_answerable", "value.constraints"
+          ]
+        }
+      ],
+      "semantic_rubric": [
+        {
+          "id": "trade-count-capability-boundary",
+          "criterion": "应明确说明现有报告无法给出逐笔交易笔数或判断交易是否过于频繁，并指出需要逐笔成交时间/交易记录；不得用合约到期月份冒充成交月份。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -149,8 +368,22 @@
       "name": "超出报告能力：杠杆与保证金",
       "question": "这份报告能告诉我账户杠杆是多少吗？",
       "expected_tools": ["get_capabilities"],
-      "must_include": [["无法回答", "无法提供", "无法直接告诉"], "K7"],
-      "must_not": ["杠杆是 1", "杠杆约为"],
+      "must_include": [],
+      "must_not": [],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_capabilities",
+          "paths": [
+            "value.source", "value.period", "value.not_answerable", "value.constraints"
+          ]
+        }
+      ],
+      "semantic_rubric": [
+        {
+          "id": "leverage-capability-boundary",
+          "criterion": "应明确说明报告不能提供或推断账户杠杆/保证金水平，并解释缺少所需数据；不得从持仓名义值自行推断杠杆。"
+        }
+      ],
       "expect_note": false
     }
   ]

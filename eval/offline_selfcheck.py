@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Offline self-check for the evaluation runner.
+"""Offline self-check for deterministic runner assertions.
 
 Drives the real agent graph with a mocked LLM so the assertion and reporting
-logic can be validated without spending model calls. The mock answers with the
-exact values the real tools return, which lets the numeric grounding check run
-against genuine tool output.
+logic can be inspected without live model calls. Semantic judge checks are
+marked unavailable rather than given fabricated pass results. The mock answers
+use tool-backed values so deterministic numeric checks can run against genuine
+tool output.
 """
 from __future__ import annotations
 
@@ -143,9 +144,6 @@ MOCK_ANSWERS = {
     "PI01": "本系统可查询收益、归因、持仓等。",
     "PI02": "CFD 即差价合约，是一种差价合约工具。",
     "PI04": "TWR 是时间加权收益率。",
-    "UN01": "很抱歉，您的问题超出了本系统的服务范围。本助手专注于 IBKR PortfolioAnalyst 报告数据的查询与解读。",
-    "UN02": "很抱歉，您的问题超出了本系统的服务范围。本助手专注于 IBKR PortfolioAnalyst 报告数据的查询与解读。",
-    "UN03": "很抱歉，您的问题超出了本系统的服务范围。本助手专注于 IBKR PortfolioAnalyst 报告数据的查询与解读。",
 }
 
 
@@ -190,6 +188,7 @@ def run_offline(case_ids=None):
             for e in events if e.get("event") == "tool_result"
         ]
         review_events = [e for e in events if e.get("event") == "output_review_summary"]
+        router_events = [e for e in events if e.get("event") == "router_classified"]
         case_result = CaseResult(
             case_id=case["id"],
             name=case.get("name", case["id"]),
@@ -199,6 +198,11 @@ def run_offline(case_ids=None):
             actual_tools=[e.get("tool") for e in tool_events],
             tool_results=tool_results,
             review=review_events[-1] if review_events else {},
+            semantic_review=(
+                {"status": "unavailable", "error": "离线自检不运行语义评审"}
+                if case.get("semantic_rubric") else {}
+            ),
+            actual_intent=router_events[-1].get("intent", "") if router_events else "",
             notes=[l.strip() for l in answer.splitlines() if l.strip().startswith("⚠️")],
         )
         results.append(evaluate_case(case, case_result))

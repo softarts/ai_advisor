@@ -21,6 +21,7 @@ from .output_review import CHECK_PLUGINS, CheckContext
 from .router import (
     INTENT_PROFILES,
     classify_intent,
+    extract_fixed_reply,
     load_compose_template,
     load_output_review_config,
 )
@@ -87,26 +88,7 @@ class Advisor:
     def _fixed_reply(self, state):
         from langchain_core.messages import AIMessage
         template = load_compose_template("unsupported")
-        # Extract only the reply text (lines after the YAML front-matter and heading)
-        lines = template.splitlines()
-        reply_lines = []
-        in_front_matter = False
-        past_front_matter = False
-        for line in lines:
-            if line.strip() == "---":
-                if not past_front_matter:
-                    in_front_matter = not in_front_matter
-                    if not in_front_matter:
-                        past_front_matter = True
-                continue
-            if not past_front_matter:
-                continue
-            # Skip heading lines before body
-            if not reply_lines:
-                if line.startswith("#") or not line.strip():
-                    continue
-            reply_lines.append(line)
-        reply = "\n".join(reply_lines).strip()
+        reply = extract_fixed_reply(template)
         if not reply:
             reply = "很抱歉，您的问题超出了本系统的服务范围。"
         return {"messages": [AIMessage(content=reply)]}

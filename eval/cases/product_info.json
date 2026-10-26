@@ -6,10 +6,25 @@
       "id": "PI01",
       "name": "系统能力范围",
       "question": "这个系统能做什么？你能回答哪些关于我账户的问题？",
-      "expected_tools": [],
-      "optional_tools": ["get_capabilities"],
+      "expected_tools": ["get_capabilities"],
+      "optional_tools": [],
       "must_include": [],
       "must_not": [],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_capabilities",
+          "paths": [
+            "value.source", "value.period", "value.answerable",
+            "value.answerable_with_caveats", "value.not_answerable", "value.constraints"
+          ]
+        }
+      ],
+      "semantic_rubric": [
+        {
+          "id": "explain-system-capabilities",
+          "criterion": "应以清晰、准确的方式概述系统能做什么、可回答哪些账户问题及其主要数据边界；不得声称系统具备数据或工具未支持的能力。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -18,8 +33,14 @@
       "question": "什么是 CFD？",
       "expected_tools": [],
       "optional_tools": ["get_capabilities"],
-      "must_include": ["差价合约"],
+      "must_include": [],
       "must_not": ["保证金要求为", "具体杠杆为"],
+      "semantic_rubric": [
+        {
+          "id": "define-cfd-correctly",
+          "criterion": "应正确解释 CFD（差价合约）的基本含义，说明它是跟踪标的价格变动的合约而非持有标的本身；不得编造具体平台规则或个性化交易建议。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -28,8 +49,26 @@
       "question": "这份报告覆盖到什么时间？有哪些限制不能回答？",
       "expected_tools": ["get_capabilities"],
       "optional_tools": [],
-      "must_include": ["2026-10-09"],
+      "must_include": [],
+      "tool_value_assertions": [
+        {"tool": "get_capabilities", "path": "value.period.1"}
+      ],
       "must_not": [],
+      "semantic_fact_paths": [
+        {
+          "tool": "get_capabilities",
+          "paths": [
+            "value.source", "value.period", "value.answerable_with_caveats",
+            "value.not_answerable", "value.constraints"
+          ]
+        }
+      ],
+      "semantic_rubric": [
+        {
+          "id": "explain-report-limitations",
+          "criterion": "除报告覆盖截止时间外，应回应报告不能回答的主要问题/限制，并避免夸大报告可提供的交易级或风险级信息。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -40,6 +79,12 @@
       "optional_tools": ["get_capabilities"],
       "must_include": [],
       "must_not": [],
+      "semantic_rubric": [
+        {
+          "id": "explain-twr-and-pa",
+          "criterion": "应准确、易懂地解释 TWR（时间加权收益率）如何尽量排除外部资金流影响，以及 PA 在本系统中的报告/归因口径；不得将两者混为一谈。"
+        }
+      ],
       "expect_note": false
     }
   ]

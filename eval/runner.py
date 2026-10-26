@@ -2,8 +2,8 @@
 """Evaluation runner for the real advisor agent.
 
 Runs a fixed case set against the live agent (real LLM + real tools + real
-answer checklist) and decides every outcome in code. Each case runs in its own
-thread so no context leaks between cases.
+answer checklist), combining deterministic assertions with a separate semantic
+judge for explicitly configured rubrics. Each case runs in its own thread.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from advisor.llm_settings import MAX_COMPLETION_TOKENS
 from advisor.output_review import CheckContext
 from advisor.tools import create_tools
 from eval.report import CaseResult, evaluate_case, summarize
+from eval.semantic_judge import SemanticJudgeError, review_case, select_tool_facts
 
 REQUIRED_ENV_VARS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL")
 CASES_DIR = Path(__file__).resolve().parent / "cases"
@@ -159,9 +160,9 @@ def preflight_tool_support(attempts: int = 3) -> str:
 def load_cases(case_filter: list[str] | None = None) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     for path in sorted(CASES_DIR.glob("*.json")):
-        if path.name == "why_month.json":
-            continue
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") == "legacy_not_loaded":
+            continue
         intent = payload.get("intent", path.stem)
         for case in payload.get("cases", []):
             case = {**case, "intent": intent, "case_file": path.name}
@@ -330,6 +331,21 @@ def run_case(case: dict[str, Any], advisor: Advisor, collector: EventCollector) 
         notes=_extract_notes(answer),
         actual_intent=actual_intent,
     )
+    rubric = case.get("semantic_rubric") or []
+    if rubric:
+        try:
+            semantic_facts = select_tool_facts(
+                tool_results, case.get("semantic_fact_paths") or []
+            )
+            result.semantic_review = review_case(
+                case_id=case["id"],
+                question=case["question"],
+                answer=answer,
+                tool_results=semantic_facts,
+                rubric=rubric,
+            )
+        except SemanticJudgeError as exc:
+            result.semantic_review = {"status": "unavailable", "error": str(exc)}
     if result_failure:
         result.failures.append(result_failure)
     return evaluate_case(case, result)
@@ -349,6 +365,29 @@ def print_case_report(result: CaseResult) -> None:
               f"失败={len(review.get('failed_checks') or [])} 不可用={len(review.get('unavailable_checks') or [])}")
     else:
         print("  检查清单: 未执行（回答未经过 output_review 节点）")
+    semantic = result.semantic_review
+    if semantic:
+        semantic_items = semantic.get("results") or []
+        print(
+            f"  语义评审: 状态={semantic.get('status')} "
+            f"通过={sum(item.get('decision') == 'pass' for item in semantic_items)} "
+            f"失败={sum(item.get('decision') == 'fail' for item in semantic_items)} "
+            f"不确定={sum(item.get('decision') == 'uncertain' for item in semantic_items)}"
+        )
+        if semantic.get("model"):
+            print(
+                f"    Judge={semantic['model']} "
+                f"prompt_version={semantic.get('prompt_version', 'unknown')}"
+            )
+        if semantic.get("error"):
+            print(f"    不可用原因：{semantic['error']}")
+        for item in semantic_items:
+            if item.get("decision") != "pass":
+                evidence = item.get("evidence") or "（未找到直接证据）"
+                print(
+                    f"    {item.get('id')} [{item.get('decision')}]: "
+                    f"{item.get('reason', '')}；证据：{evidence}"
+                )
     for failure in result.failures:
         print(f"  ✗ {failure}")
 
@@ -410,6 +449,10 @@ def main(argv: list[str]) -> int:
                 intent=case.get("intent", ""),
                 question=case["question"],
                 answer="",
+                semantic_review=(
+                    {"status": "unavailable", "error": "案例运行异常，未生成可评审回答"}
+                    if case.get("semantic_rubric") else {}
+                ),
                 failures=[f"运行异常：{exc}" + (f"\n    服务端响应：{detail}" if detail else "")],
             )
         results.append(result)
@@ -423,6 +466,19 @@ def main(argv: list[str]) -> int:
     for intent, bucket in sorted(summary["by_intent"].items()):
         rate = round(bucket["passed"] / bucket["total"] * 100, 1) if bucket["total"] else 0.0
         print(f"  {intent}: {bucket['passed']}/{bucket['total']} ({rate}%)")
+    semantic_summary = summary["semantic_review"]
+    routing_summary = summary["routing"]
+    print(
+        "路由分类: "
+        f"正确={routing_summary['correct']} 错误={routing_summary['incorrect']} "
+        f"未记录={routing_summary['unrecorded']}"
+    )
+    if semantic_summary["cases"]:
+        print(
+            "语义评审汇总: "
+            f"通过={semantic_summary['pass']} 失败={semantic_summary['fail']} "
+            f"不确定={semantic_summary['uncertain']} 不可用={semantic_summary['unavailable']}"
+        )
     if summary["failure_reasons"]:
         print("失败原因分布:")
         for reason, count in summary["failure_reasons"].items():
@@ -443,6 +499,7 @@ def main(argv: list[str]) -> int:
                     "answer": r.answer,
                     "actual_tools": r.actual_tools,
                     "review": r.review,
+                    "semantic_review": r.semantic_review,
                     "notes": r.notes,
                     "failures": r.failures,
                     "passed": r.passed,

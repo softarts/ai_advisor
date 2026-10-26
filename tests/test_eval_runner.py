@@ -13,7 +13,7 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -25,7 +25,7 @@ os.environ.setdefault("LLM_BASE_URL", "https://llm.example")
 
 from advisor.agent import Advisor
 from advisor.tools import create_tools
-from eval.report import CaseResult, evaluate_case, summarize
+from eval.report import CaseResult, evaluate_case as _evaluate_case, summarize
 from eval.runner import (
     EventCollector,
     load_cases,
@@ -34,6 +34,27 @@ from eval.runner import (
     print_case_answer,
 )
 from pa_analytics import Store
+
+
+def evaluate_case(case, result):
+    """Mock the separately exercised route and semantic-review layers."""
+    if not result.actual_intent:
+        result.actual_intent = case.get("intent", result.intent)
+    rubric = case.get("semantic_rubric") or []
+    if rubric and not result.semantic_review:
+        result.semantic_review = {
+            "status": "completed",
+            "results": [
+                {
+                    "id": item["id"],
+                    "decision": "pass",
+                    "evidence": result.answer[:120],
+                    "reason": "mock",
+                }
+                for item in rubric
+            ],
+        }
+    return _evaluate_case(case, result)
 
 
 def _tool_result(tool_name, payload):
@@ -721,6 +742,247 @@ class RouterParsingTests(unittest.TestCase):
         with patch("advisor.router.httpx.post", side_effect=lambda *a, **k: next(responses)):
             intent = router_module.classify_intent("q", logging.getLogger("router-test"), "t")
         self.assertEqual(intent, "product_info")
+
+
+class ToolFactAssertionTests(unittest.TestCase):
+    def test_tool_value_assertion_checks_value_near_dynamic_label(self):
+        result = CaseResult(
+            "DQ01", "extrema", "data_query", "q",
+            "最高月份 2025-03，收益 4.49%；最低月份 2025-05，收益 -4.02%。",
+            actual_tools=["get_monthly_returns"],
+            tool_results=[
+                _tool_result("get_monthly_returns", {
+                    "value": {
+                        "best_month": {"month": "2025-03", "account_return_pct": 4.49},
+                        "worst_month": {"month": "2025-05", "account_return_pct": -4.02},
+                    }
+                })
+            ],
+        )
+        case = {
+            "expected_tools": ["get_monthly_returns"],
+            "tool_value_assertions": [
+                {
+                    "tool": "get_monthly_returns",
+                    "path": "value.best_month.account_return_pct",
+                    "label_path": "value.best_month.month",
+                },
+                {
+                    "tool": "get_monthly_returns",
+                    "path": "value.worst_month.account_return_pct",
+                    "label_path": "value.worst_month.month",
+                },
+            ],
+            "check_numbers_grounded": False,
+        }
+        _evaluate_case(case, result)
+        self.assertEqual(result.failures, [])
+
+    def test_tool_value_assertion_rejects_value_attached_to_wrong_label(self):
+        result = CaseResult(
+            "DQ01", "extrema", "data_query", "q",
+            "2025-03 为 -4.02%，2025-05 为 4.49%。",
+            actual_tools=["get_monthly_returns"],
+            tool_results=[
+                _tool_result("get_monthly_returns", {
+                    "value": {
+                        "best_month": {"month": "2025-03", "account_return_pct": 4.49},
+                    }
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_monthly_returns"],
+                "tool_value_assertions": [{
+                    "tool": "get_monthly_returns",
+                    "path": "value.best_month.account_return_pct",
+                    "label_path": "value.best_month.month",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("回答未包含工具" in failure for failure in result.failures))
+
+    def test_tool_value_assertion_accepts_matching_value_in_any_tool_call(self):
+        result = CaseResult(
+            "DQ01", "extrema", "data_query", "q", "收益 4.49%。",
+            actual_tools=["get_monthly_returns", "get_monthly_returns"],
+            tool_results=[
+                _tool_result("get_monthly_returns", {"value": {"account_return_pct": 2.0}}),
+                _tool_result("get_monthly_returns", {"value": {"account_return_pct": 4.49}}),
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_monthly_returns"],
+                "tool_value_assertions": [{
+                    "tool": "get_monthly_returns",
+                    "path": "value.account_return_pct",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertEqual(result.failures, [])
+
+
+class SemanticJudgeTests(unittest.TestCase):
+    def test_judge_validates_structured_response_and_source_evidence(self):
+        from eval.semantic_judge import review_case
+
+        rubric = [{"id": "cause-boundary", "criterion": "不得作无依据因果归因"}]
+        content = json.dumps({
+            "results": [{
+                "id": "cause-boundary",
+                "decision": "pass",
+                "evidence": "无法确定原因",
+                "reason": "回答明确表达不确定性",
+            }]
+        }, ensure_ascii=False)
+        response = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": content}}]}
+        response.raise_for_status.return_value = None
+        with patch("eval.semantic_judge.httpx.post", return_value=response):
+            reviewed = review_case("DQ12", "q", "无法确定原因", [], rubric)
+        self.assertEqual(reviewed["results"][0]["decision"], "pass")
+        self.assertEqual(reviewed["results"][0]["evidence"], "无法确定原因")
+
+    def test_semantic_facts_projection_excludes_unrequested_tool_fields(self):
+        from eval.semantic_judge import select_tool_facts
+
+        selected = select_tool_facts(
+            [_tool_result("get_capabilities", {
+                "value": {
+                    "period": ["2017-08-01", "2026-10-09"],
+                    "snapshots": [{"account": "private"}],
+                }
+            })],
+            [{"tool": "get_capabilities", "paths": ["value.period"]}],
+        )
+        self.assertEqual(selected, [{
+            "tool": "get_capabilities",
+            "facts": {"value.period": ["2017-08-01", "2026-10-09"]},
+        }])
+
+    def test_semantic_facts_projection_fails_when_a_required_path_is_missing(self):
+        from eval.semantic_judge import SemanticJudgeError, select_tool_facts
+
+        with self.assertRaises(SemanticJudgeError):
+            select_tool_facts(
+                [_tool_result("get_capabilities", {"value": {}})],
+                [{"tool": "get_capabilities", "paths": ["value.period"]}],
+            )
+
+    def test_judge_rejects_evidence_not_present_in_answer(self):
+        from eval.semantic_judge import SemanticJudgeError, review_case
+
+        rubric = [{"id": "cause-boundary", "criterion": "不得作无依据因果归因"}]
+        content = json.dumps({
+            "results": [{
+                "id": "cause-boundary",
+                "decision": "pass",
+                "evidence": "not quoted",
+                "reason": "理由",
+            }]
+        })
+        response = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": content}}]}
+        response.raise_for_status.return_value = None
+        with patch("eval.semantic_judge.httpx.post", return_value=response):
+            with self.assertRaises(SemanticJudgeError):
+                review_case("DQ12", "q", "答案", [], rubric)
+
+    def test_semantic_fail_remains_a_failure_alongside_deterministic_checks(self):
+        result = CaseResult(
+            "DQ12", "attribution", "data_query", "q", "TWR -3.75%。亏损由市场回调造成。",
+            semantic_review={
+                "status": "completed",
+                "results": [{
+                    "id": "cause-boundary",
+                    "decision": "fail",
+                    "evidence": "亏损由市场回调造成",
+                    "reason": "因果结论缺乏工具依据",
+                }],
+            },
+        )
+        _evaluate_case(
+            {
+                "semantic_rubric": [{
+                    "id": "cause-boundary",
+                    "criterion": "不得作无依据因果归因",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("语义评审 fail" in failure for failure in result.failures))
+
+    def test_semantic_rubric_without_review_fails_closed(self):
+        result = CaseResult("PI01", "capabilities", "product_info", "q", "答案。")
+        _evaluate_case(
+            {
+                "semantic_rubric": [{
+                    "id": "coverage",
+                    "criterion": "准确回答问题",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("语义评审未执行" in failure for failure in result.failures))
+
+    def test_semantic_pass_without_evidence_fails_closed(self):
+        result = CaseResult(
+            "PI01", "capabilities", "product_info", "q", "答案。",
+            semantic_review={
+                "status": "completed",
+                "results": [{
+                    "id": "coverage",
+                    "decision": "pass",
+                    "evidence": "",
+                    "reason": "符合",
+                }],
+            },
+        )
+        _evaluate_case(
+            {
+                "semantic_rubric": [{
+                    "id": "coverage",
+                    "criterion": "准确回答问题",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("缺少回答证据" in failure for failure in result.failures))
+
+
+class FixedReplyAssertionTests(unittest.TestCase):
+    def test_unsupported_requires_expected_route_and_exact_fixed_reply(self):
+        from advisor.router import extract_fixed_reply, load_compose_template
+
+        expected = extract_fixed_reply(load_compose_template("unsupported"))
+        case = {"intent": "unsupported", "expect_fixed_reply": True, "expected_tools": []}
+        result = CaseResult(
+            "UN01", "unsupported", "unsupported", "q", expected,
+            actual_intent="unsupported",
+        )
+        _evaluate_case(case, result)
+        self.assertEqual(result.failures, [])
+
+    def test_unsupported_wrong_route_fails_even_if_reply_text_matches(self):
+        from advisor.router import extract_fixed_reply, load_compose_template
+
+        expected = extract_fixed_reply(load_compose_template("unsupported"))
+        case = {"intent": "unsupported", "expect_fixed_reply": True, "expected_tools": []}
+        result = CaseResult(
+            "UN01", "unsupported", "unsupported", "q", expected,
+            actual_intent="product_info",
+        )
+        _evaluate_case(case, result)
+        self.assertTrue(any("固定拒答用例未路由" in failure for failure in result.failures))
 
 
 if __name__ == "__main__":

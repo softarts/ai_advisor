@@ -262,3 +262,24 @@ def load_compose_template(intent: str) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
+
+
+def extract_fixed_reply(template: str) -> str:
+    """Return the body of a fixed-reply template, excluding front matter and headings."""
+    lines = template.splitlines()
+    reply_lines = []
+    in_front_matter = False
+    past_front_matter = False
+    for line in lines:
+        if line.strip() == "---":
+            if not past_front_matter:
+                in_front_matter = not in_front_matter
+                if not in_front_matter:
+                    past_front_matter = True
+            continue
+        if not past_front_matter:
+            continue
+        if not reply_lines and (line.startswith("#") or not line.strip()):
+            continue
+        reply_lines.append(line)
+    return "\n".join(reply_lines).strip()
