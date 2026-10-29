@@ -378,14 +378,19 @@ def _matches_evidence(number: Decimal, category: str, currency: str | None, quan
     return True
 
 
-_CITATION_BLOCK_RE = re.compile(r"\n\n数字来源：\n(?:-\s.*\n?)+")
+_CITATION_BLOCK_RE = re.compile(
+    r"\n\n数字来源：\n(?:(?:\[\d+\]\s.*)|(?:-\s.*))\n?"
+    r"(?:(?:\[\d+\]\s.*)|(?:-\s.*)\n?)*"
+)
 _INLINE_CITATION_RE = re.compile(r"〔来源：[^〕]*〕")
+_INLINE_SOURCE_INDEX_RE = re.compile(r"[ \t]*(?:\[\d+\])+")
 
 
 def _strip_prior_annotation(candidate: str) -> str:
     """Remove annotations added by a previous review pass so re-checking is idempotent."""
     body = _CITATION_BLOCK_RE.sub("", candidate)
     body = _INLINE_CITATION_RE.sub("", body)
+    body = _INLINE_SOURCE_INDEX_RE.sub("", body)
     return body.rstrip()
 
 
@@ -527,7 +532,7 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
         and not any(match.start() < end and start < match.end() for start, end in excluded)
         and _parse_number(match)[1] in {"ratio", "pp", "amount"}
     ]
-    citations = []
+    sources_by_index: dict[str, int] = {}
     replacements = []
     failed_values = []
 
@@ -540,15 +545,27 @@ def check_numeric_provenance(context: CheckContext) -> CheckOutcome:
             if currency is not None or category != "amount"
             if _matches_evidence(number, category, currency, quantum, item, explicit_sign)
         ]
-        source_text = ", ".join(dict.fromkeys(sources)) if sources else "未在工具结果中匹配"
-        replacements.append((match.start(), match.end(), f"{match.group()}〔来源：{source_text}〕"))
-        citations.append(f"{match.group()}：{source_text}")
-        if not sources:
+        unique_sources = list(dict.fromkeys(sources))
+        if unique_sources:
+            indexes = []
+            for source in unique_sources:
+                if source not in sources_by_index:
+                    sources_by_index[source] = len(sources_by_index) + 1
+                indexes.append(sources_by_index[source])
+            reference = "".join(f"[{index}]" for index in indexes)
+            replacements.append((match.start(), match.end(), f"{match.group()} {reference}"))
+        else:
+            replacements.append(
+                (match.start(), match.end(), f"{match.group()}〔来源：未在工具结果中匹配〕")
+            )
             failed_values.append(match.group())
 
     annotated = _apply_replacements(body, replacements)
-    if citations:
-        annotated += "\n\n数字来源：\n" + "\n".join(f"- {item}" for item in citations)
+    if sources_by_index:
+        source_lines = [
+            f"[{index}] {source}" for source, index in sources_by_index.items()
+        ]
+        annotated += "\n\n数字来源：\n" + "\n".join(source_lines)
     return CheckOutcome(
         passed=not failed_values,
         reason="数字均可追溯至本轮工具结果" if not failed_values else

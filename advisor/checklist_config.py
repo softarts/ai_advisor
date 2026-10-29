@@ -10,8 +10,17 @@ class CheckDefinition(dict):
     the answer itself were defective.
     """
 
-    def __init__(self, enabled: bool, failure_note: str, unavailable_note: str):
-        super().__init__(enabled=enabled, failure_note=failure_note, unavailable_note=unavailable_note)
+    def __init__(
+        self,
+        enabled: bool,
+        failure_note: str,
+        unavailable_note: str,
+    ):
+        super().__init__(
+            enabled=enabled,
+            failure_note=failure_note,
+            unavailable_note=unavailable_note,
+        )
 
 
 GLOBAL_CHECKS: dict[str, CheckDefinition] = {

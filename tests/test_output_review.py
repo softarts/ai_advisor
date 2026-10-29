@@ -8,7 +8,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from advisor.agent import Advisor
 from advisor.checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
-from advisor.output_review import CheckContext, check_numeric_provenance, parse_review_verdict
+from advisor.output_review import (
+    CheckContext,
+    check_numeric_provenance,
+    parse_review_verdict,
+)
 from advisor.router import load_output_review_config
 
 
@@ -136,9 +140,10 @@ class OutputReviewTests(unittest.TestCase):
         )
         outcome = check_numeric_provenance(context)
         self.assertTrue(outcome.passed)
-        self.assertIn("+19.35%〔来源：get_window_summary$.value.twr_pct〕", outcome.candidate)
-        self.assertIn("+5万 USD〔来源：get_window_summary$.value.profit〕", outcome.candidate)
-        self.assertIn("数字来源：", outcome.candidate)
+        self.assertIn("+19.35% [1]", outcome.candidate)
+        self.assertIn("+5万 USD [2]", outcome.candidate)
+        self.assertIn("[1] get_window_summary$.value.twr_pct", outcome.candidate)
+        self.assertIn("[2] get_window_summary$.value.profit", outcome.candidate)
 
     def test_numeric_values_in_tool_text_are_valid_evidence(self):
         context = CheckContext(
@@ -154,7 +159,7 @@ class OutputReviewTests(unittest.TestCase):
         )
         outcome = check_numeric_provenance(context)
         self.assertTrue(outcome.passed)
-        self.assertIn("get_month_detail$.warnings[0]", outcome.candidate)
+        self.assertIn("[1] get_month_detail$.warnings[0]", outcome.candidate)
 
     def test_amount_rounding_uses_displayed_decimal_places(self):
         context = CheckContext(
@@ -175,7 +180,10 @@ class OutputReviewTests(unittest.TestCase):
 
     def test_unmatched_number_fails_check_without_rejecting_answer(self):
         advisor = self._advisor()
-        state = self._state("收益是 19.35%。", intent="data_query")
+        state = {
+            **self._state("收益是 19.35%。", intent="data_query"),
+            "review_retry_count": 1,
+        }
         result = advisor._output_review(state)
         answer = result["messages"][0].content
         self.assertIn("19.35%〔来源：未在工具结果中匹配〕", answer)
@@ -202,6 +210,40 @@ class OutputReviewTests(unittest.TestCase):
         answer = result["messages"][0].content
         self.assertIn("Candidate answer.", answer)
         self.assertIn("答案检查输入不完整", answer)
+
+    def test_numeric_review_does_not_infer_pa_category_from_nearby_label(self):
+        advisor = self._advisor()
+        tool_message = ToolMessage(
+            name="get_month_detail",
+            tool_call_id="attribution-review",
+            content=json.dumps({
+                "status": "ok",
+                "value": {
+                    "return": {"twr_pct": -3.75},
+                    "contribution_pp": {
+                        "consistency": "inconsistent",
+                        "etfs": 0.0,
+                        "stocks": 0.0,
+                        "options": 0.0,
+                        "futures": -12.286702847,
+                        "futures_options": -16.348891819,
+                        "future_style_options": 0.0,
+                        "cash": 10.727310563,
+                        "derivatives_merged": -28.635594666,
+                    },
+                },
+            }, ensure_ascii=False),
+        )
+        state = self._state(
+            "PA 类别贡献：期货 +10.7273 pp。TWR 为 -3.75%。",
+            intent="data_query",
+            tool_results=(tool_message,),
+        )
+        result = advisor._output_review(state)
+        answer = result["messages"][0].content
+        self.assertNotIn("review_repair_request", result)
+        self.assertIn("10.7273 pp [1]", answer)
+        self.assertNotIn("PA 类别与贡献值配对", answer)
 
 
 class NumericSignTests(unittest.TestCase):
@@ -289,7 +331,10 @@ class OutputReviewLoggingTests(unittest.TestCase):
         summary = next(r for r in records if r.get("event") == "output_review_summary")
         self.assertTrue(summary["passed"])
         self.assertEqual(summary["failed_checks"], [])
-        self.assertEqual(summary["checks_run"], ["numeric_provenance"])
+        self.assertEqual(
+            summary["checks_run"],
+            ["numeric_provenance"],
+        )
         self.assertEqual(summary["trace_id"], "trace-pass")
 
     def test_failing_review_is_logged_with_failed_checks(self):
@@ -299,6 +344,7 @@ class OutputReviewLoggingTests(unittest.TestCase):
         advisor._output_review({
             "intent": "data_query",
             "messages": [HumanMessage(content="q"), AIMessage(content="收益 19.35%。")],
+            "review_retry_count": 1,
         })
         summary = next(r for r in records if r.get("event") == "output_review_summary")
         self.assertFalse(summary["passed"])
@@ -346,7 +392,35 @@ class AnnotationIdempotencyTests(unittest.TestCase):
         first = check_numeric_provenance(self._context("收益 +4.50%。"))
         second = check_numeric_provenance(self._context(first.candidate))
         self.assertEqual(second.candidate.count("数字来源："), 1)
-        self.assertEqual(second.candidate.count("〔来源："), 1)
+        self.assertEqual(second.candidate.count("[1]"), 2)
+
+    def test_repeated_values_reuse_source_indices(self):
+        context = self._context("TWR +4.50%，月收益也是 +4.50%。")
+        first = check_numeric_provenance(context)
+        second = check_numeric_provenance(self._context(first.candidate))
+        self.assertEqual(first.candidate, second.candidate)
+        self.assertIn("TWR +4.50% [1]，月收益也是 +4.50% [1]", first.candidate)
+        self.assertEqual(first.candidate.count("[1]"), 3)
+
+    def test_equal_values_cite_each_matching_source(self):
+        context = CheckContext(
+            intent="data_query",
+            question="q",
+            candidate="收益 +4.50%。",
+            tool_results=[{
+                "tool": "get_month_detail",
+                "content": json.dumps({
+                    "return": {"twr_pct": 4.50},
+                    "benchmark": {"return_pct": 4.50},
+                }),
+            }],
+            logger=logging.getLogger("output-review-test"),
+            trace_id="test-trace",
+        )
+        outcome = check_numeric_provenance(context)
+        self.assertIn("收益 +4.50% [1][2]", outcome.candidate)
+        self.assertIn("[1] get_month_detail$.return.twr_pct", outcome.candidate)
+        self.assertIn("[2] get_month_detail$.benchmark.return_pct", outcome.candidate)
 
     def test_prior_annotation_is_stripped_before_matching(self):
         annotated = "收益 +4.50%〔来源：get_month_detail$.value.twr_pct〕。\n\n数字来源：\n-  +4.50%：get_month_detail$.value.twr_pct"
@@ -376,7 +450,7 @@ class AnnotationReplacementTests(unittest.TestCase):
         outcome = check_numeric_provenance(context)
         self.assertIn("2025-04 TWR", outcome.candidate)
         self.assertNotIn("2025-04〔来源：", outcome.candidate)
-        self.assertIn("-3.75%〔来源：", outcome.candidate)
+        self.assertIn("-3.75% [1]", outcome.candidate)
         self.assertIn("触发门禁。", outcome.candidate)
         self.assertNotIn("〕th", outcome.candidate)
         self.assertNotIn("S-3.75", outcome.candidate)
@@ -400,7 +474,7 @@ class AnnotationReplacementTests(unittest.TestCase):
         candidate = check_numeric_provenance(context).candidate
         self.assertLess(candidate.index("2025-04"), candidate.index("-3.75%"))
         self.assertNotIn("2025-04〔来源：", candidate)
-        self.assertIn("TWR -3.75%〔来源：", candidate)
+        self.assertIn("TWR -3.75% [1]", candidate)
 
 
 class StructuralNumberTests(unittest.TestCase):
@@ -537,7 +611,8 @@ class UnicodeSeparatorTests(unittest.TestCase):
         outcome = check_numeric_provenance(self._context(
             f"期初净值 420{self.NBSP}878.99 SGD。"
         ))
-        self.assertIn("420,878.99 SGD〔来源：get_month_detail$.nav.opening〕", outcome.candidate)
+        self.assertIn("420,878.99 SGD [1]", outcome.candidate)
+        self.assertIn("[1] get_month_detail$.nav.opening", outcome.candidate)
 
     def test_non_breaking_hyphen_date_is_recognised(self):
         outcome = check_numeric_provenance(self._context(
@@ -646,7 +721,7 @@ class BaseCurrencyEvidenceTests(unittest.TestCase):
 
     def test_base_field_is_labelled_with_the_account_currency(self):
         outcome = check_numeric_provenance(self._context("467,778.17 SGD。"))
-        self.assertIn("get_open_positions$.value.positions[0].value_base", outcome.candidate)
+        self.assertIn("[1] get_open_positions$.value.positions[0].value_base", outcome.candidate)
 
 
 class NonDataNumberTests(unittest.TestCase):
@@ -738,6 +813,7 @@ class MultiTurnReviewTests(unittest.TestCase):
         advisor = self._advisor()
         result = advisor._output_review({
             "intent": "data_query",
+            "review_retry_count": 1,
             "messages": [
                 HumanMessage(content="第一轮"),
                 ToolMessage(
@@ -757,6 +833,7 @@ class MultiTurnReviewTests(unittest.TestCase):
         advisor = self._advisor()
         result = advisor._output_review({
             "intent": "data_query",
+            "review_retry_count": 1,
             "messages": [
                 HumanMessage(content="第一轮"),
                 ToolMessage(

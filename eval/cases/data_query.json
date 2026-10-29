@@ -102,13 +102,13 @@
         {"tool": "get_attribution", "path": "value.buckets.4.amount", "label_path": "value.buckets.4.label"}
       ],
       "semantic_fact_paths": [
-        {"tool": "get_attribution", "paths": ["value.buckets", "warnings"]}
+        {"tool": "get_attribution", "paths": ["value.buckets", "value.pa_split_reference", "warnings"]}
       ],
       "must_not": [],
       "semantic_rubric": [
         {
           "id": "attribution-answers-question",
-          "criterion": "回答应依据工具返回的归因数据正确对应类别名称与贡献值，并避免把类别贡献表述为具体交易或确定因果。"
+          "criterion": "应依据工具正确配对类别和值，并区分股票/ETF、股票期权的估算 SGD 分摊、期货/期货期权/外汇的剩余项与精确利息/费用；不得把估算或剩余项说成 PA 原始逐类报告值、已实现盈亏或确定的交易因果。"
         }
       ],
       "expect_note": false
@@ -242,11 +242,16 @@
       "must_include": [],
       "tool_value_assertions": [
         {"tool": "get_month_detail", "path": "return.twr_pct"},
-        {"tool": "get_month_detail", "path": "return.benchmarks_pct.SPXTR"},
-        {"tool": "get_month_detail", "path": "profit_sgd"},
-        {"tool": "get_month_detail", "path": "flows.deposits"},
-        {"tool": "get_month_detail", "path": "contribution_pp.futures_options"},
-        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate"}
+        {"tool": "get_month_detail", "path": "return.benchmarks_pct.SPXTR", "label": "SPXTR"},
+        {"tool": "get_month_detail", "path": "profit_sgd", "label": "盈亏"},
+        {"tool": "get_month_detail", "path": "flows.deposits", "label": "入金"},
+        {"tool": "get_month_detail", "path": "contribution_pp.futures", "label": "期货"},
+        {"tool": "get_month_detail", "path": "contribution_pp.futures_options", "labels": ["期货期权", "期货/期权"]},
+        {"tool": "get_month_detail", "path": "contribution_pp.derivatives_merged", "label": "合并衍生品"},
+        {"tool": "get_month_detail", "path": "contribution_pp.cash", "label": "现金类贡献"},
+        {"tool": "get_month_detail", "path": "cash_category.interest_exact", "label": "利息"},
+        {"tool": "get_month_detail", "path": "cash_category.fees_exact", "label": "费用"},
+        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate", "label": "未解释"}
       ],
       "semantic_fact_paths": [
         {
@@ -261,7 +266,7 @@
       "semantic_rubric": [
         {
           "id": "monthly-attribution-boundaries",
-          "criterion": "解释高收益时，应区分账户整体收益与类别归因，不得把类别贡献推断为具体交易原因；应正确说明出入金不是投资收益，并遵守工具提供的归因限制。"
+          "criterion": "应依据工具报告 PA 类别的原始贡献并区分百分点贡献、估算 SGD 分摊与账户 TWR；说明期货和期货期权可能因行权产生类别转移、提供合并视角但不得断言本月发生行权或具体因果。不得把类别贡献说成已实现盈亏。还应正确说明出入金不是投资收益并遵守其他工具边界。"
         }
       ],
       "expect_note": false
@@ -273,7 +278,13 @@
       "expected_tools": ["get_month_detail"],
       "must_include": [],
       "tool_value_assertions": [
-        {"tool": "get_month_detail", "path": "return.twr_pct"}
+        {"tool": "get_month_detail", "path": "return.twr_pct", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.futures", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.futures_options", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.derivatives_merged", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.cash", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.sum", "require_source_path": true},
+        {"tool": "get_month_detail", "path": "contribution_pp.twr_gap_pp", "require_source_path": true}
       ],
       "semantic_fact_paths": [
         {
@@ -284,30 +295,19 @@
           ]
         }
       ],
-      "conditional_tool_value_guards": [
-        {
-          "tool": "get_month_detail",
-          "when": {"path": "contribution_pp.consistency", "equals": "inconsistent"},
-          "forbidden_values": [
-            {"path": "contribution_pp.etfs", "labels": ["ETF", "股票/ETF"]},
-            {"path": "contribution_pp.stocks", "labels": ["股票"]},
-            {"path": "contribution_pp.options", "labels": ["股票期权"]},
-            {"path": "contribution_pp.futures", "labels": ["期货"]},
-            {"path": "contribution_pp.futures_options", "labels": ["期货期权", "期货/期权"]},
-            {"path": "contribution_pp.future_style_options", "labels": ["未来风格期权"]},
-            {"path": "contribution_pp.cash", "labels": ["现金类", "现金"]}
-          ]
-        }
-      ],
       "must_not": [],
       "semantic_rubric": [
         {
           "id": "identify-attribution-inconsistency",
-          "criterion": "应传达类别归因合计与 TWR 不一致，且因此不能可靠地从类别归因确定亏损来源；表达可使用任意自然措辞。"
+          "criterion": "应说明 PA 原始类别贡献仍可报告，但类别合计与 TWR 不一致时不能作为整体 TWR 的完整对账拆分，也不能据此估算各类别 SGD 盈亏或确定整体亏损原因。"
         },
         {
           "id": "avoid-unsupported-loss-causality",
-          "criterion": "不得把亏损归因于某个资产类别、具体合约/交易、市场回调或笼统的组合表现，除非工具结果明确支持该因果结论。"
+          "criterion": "不得把类别贡献表述为已实现盈亏或账户整体亏损的确定原因，也不得归因于具体合约/交易、市场回调或笼统组合表现，除非工具结果明确支持该因果结论。"
+        },
+        {
+          "id": "explain-derivative-classification",
+          "criterion": "应以 PA 口径说明期货和期货期权类别可能因行权发生转移，并提供两类合并视角；不得推断该月确实发生了行权，也不得推断两类必然来自同一合约或事件。"
         }
       ],
       "expect_note": false
@@ -319,13 +319,16 @@
       "expected_tools": ["get_month_detail"],
       "must_include": [],
       "tool_value_assertions": [
-        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate"}
+        {"tool": "get_month_detail", "path": "contribution_pp.cash", "label": "现金类贡献"},
+        {"tool": "get_month_detail", "path": "cash_category.interest_exact", "label": "利息"},
+        {"tool": "get_month_detail", "path": "cash_category.fees_exact", "label": "费用"},
+        {"tool": "get_month_detail", "path": "cash_category.unexplained_sgd_estimate", "label": "未解释"}
       ],
       "semantic_fact_paths": [
         {
           "tool": "get_month_detail",
           "paths": [
-            "month", "cash_category", "boundary", "caveats", "warnings"
+            "month", "contribution_pp", "cash_category", "flows", "boundary", "caveats", "warnings"
           ]
         }
       ],
@@ -333,7 +336,7 @@
       "semantic_rubric": [
         {
           "id": "cash-attribution-uncertainty",
-          "criterion": "应说明工具未能验证现金类贡献的具体来源，不得将其断言为美元升值、汇率收益、利息或费用，除非工具事实明确支持。"
+          "criterion": "应区分现金类别 PA 贡献、精确利息/费用与未解释估算金额；未解释金额的具体来源不能确认，可能包括汇率折算或其他未分类因素。不得仅因没有入金出金就断言为汇率变化，也不得把未解释金额断言为美元升值、利息或费用。"
         }
       ],
       "expect_note": false

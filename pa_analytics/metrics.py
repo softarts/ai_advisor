@@ -625,6 +625,9 @@ def month_detail(source, month: str) -> dict:
         fees_exact = _sum_in(rep.fees, s_date, e_date)
         div_amount = _sum_in(rep.dividends, s_date, e_date)
 
+    derivatives_merged_pp = (
+        c_pp["futures"] + c_pp["futures_options"] + c_pp["future_style_options"]
+    )
     sum_pp = sum(c_pp.values())
     twr_gap_pp = sum_pp - (twr_pct or 0.0)
     consistency = "ok" if abs(twr_gap_pp) <= CONSISTENCY_THRESHOLD_PP else "inconsistent"
@@ -635,7 +638,7 @@ def month_detail(source, month: str) -> dict:
         k_factor = profit_sgd / sum_pp
         stocks_etf_pp = c_pp["etfs"] + c_pp["stocks"]
         options_pp = c_pp["options"]
-        derivs_pp = c_pp["futures"] + c_pp["futures_options"] + c_pp["future_style_options"]
+        derivs_pp = derivatives_merged_pp
         cash_pp = c_pp["cash"]
 
         comp_items = [
@@ -689,7 +692,8 @@ def month_detail(source, month: str) -> dict:
         if consistency != "ok":
             composition_unavailable_reason = (
                 f"各品种贡献之和（{sum_pp:.2f}%）与月度 TWR（{twr_pct:.2f}%）相差 {twr_gap_pp:+.2f} 个百分点，"
-                f"超出允许门禁（±{CONSISTENCY_THRESHOLD_PP} 个百分点），品种拆分不自洽，不提供品种拆分。"
+                f"超出对账阈值（±{CONSISTENCY_THRESHOLD_PP} 个百分点）；PA 原始类别贡献仍可报告，"
+                "但不能作为整体 TWR 的完整对账拆分，也不据此估算各类 SGD 盈亏。"
             )
         else:
             composition_unavailable_reason = (
@@ -705,12 +709,12 @@ def month_detail(source, month: str) -> dict:
     can_say = [
         f"本月（{month}）TWR 收益率（{twr_pct:+.2f}%）、同月基准表现及在 110 个完整月中的历史排名",
         "净值变动、当月出入金流水与精确投资盈亏金额（入金不计入收益）",
-        "各类资产对当月收益的贡献占比（PA 口径，属于笼统类别占比）",
+        "各类资产对当月收益的 PA 原始类别贡献（百分点口径）",
         f"利息与其它费用的当月精确发生金额",
     ]
     cannot_say = [
         "具体是哪笔交易、哪个合约、什么方向、什么时间拉高了收益（PA 不含逐笔成交时间，见 K8）",
-        "期货与期货期权各自独立的收益贡献（因行权搬家互相关联，必须合并展示，见 K3）",
+        "不能仅凭月度 PA 类别值确认期货与期货期权是否由行权关联，或还原具体行权/合约关系（见 K3）",
         "现金类中未解释部分的来源（不得断言为美元升值、利息或外汇，见 K13）",
         "杠杆倍数、占用保证金、剩余流动性或名义风险敞口（无相关数据，见 K7、K9）",
     ]
@@ -719,7 +723,10 @@ def month_detail(source, month: str) -> dict:
         can_say.append(f"该月份为截至 {closing_date} 的部分月数据")
         cannot_say.append(f"不得断言为完整全月表现（数据仅截至 {closing_date}）")
     if consistency == "inconsistent":
-        cannot_say.append(f"本月贡献之和与 TWR 差距超出阈值（差 {twr_gap_pp:+.2f} 个百分点），严禁引用任何品种拆分与估算（见 K3）")
+        cannot_say.append(
+            f"本月贡献之和与 TWR 差距超出阈值（差 {twr_gap_pp:+.2f} 个百分点），"
+            "不能将类别贡献视为整体收益的完整对账拆分或据此估算各类 SGD 盈亏（见 K3）"
+        )
     if quality == "unverified":
         cannot_say.append(f"本月处于 {VALIDATED_FROM} 验证起点之前，归因估算未经验证，仅供参考（见 K5）")
 
@@ -731,7 +738,10 @@ def month_detail(source, month: str) -> dict:
     if is_partial:
         warnings.append(f"{month} 截至 {closing_date}，是部分月。")
     if consistency != "ok":
-        warnings.append(f"{month} 品种贡献之和（{sum_pp:.2f}%）与 TWR（{twr_pct:.2f}%）相差 {twr_gap_pp:+.2f} 个百分点，自洽门禁未通过，不提供品种拆分。")
+        warnings.append(
+            f"{month} PA 类别贡献之和（{sum_pp:.2f}%）与 TWR（{twr_pct:.2f}%）相差 "
+            f"{twr_gap_pp:+.2f} 个百分点；类别原始贡献仍可报告，但不能作为整体收益的完整对账拆分。"
+        )
     if quality == "unverified":
         warnings.append(f"{month} 处于 {VALIDATED_FROM} 之前，归因估算未经验证。")
 
@@ -762,6 +772,7 @@ def month_detail(source, month: str) -> dict:
         "holdings_month_end": holdings_month_end,
         "contribution_pp": {
             **c_pp,
+            "derivatives_merged": derivatives_merged_pp,
             "sum": sum_pp,
             "twr_gap_pp": twr_gap_pp,
             "consistency": consistency,

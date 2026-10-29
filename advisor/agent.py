@@ -305,12 +305,19 @@ class Advisor:
         numeric_failures = [reason for check_id, _, reason in failed_checks
                             if check_id == "numeric_provenance"]
         retry_count = state.get("review_retry_count", 0)
-        if numeric_failures and retry_count < 1:
+        if retry_count < 1 and numeric_failures:
+            repair_instructions = []
+            if numeric_failures:
+                repair_instructions.append(
+                    "数字溯源复核发现以下金额或比率没有本轮工具结果的直接依据："
+                    + "；".join(numeric_failures)
+                    + "。删除这些无依据数字及依赖它们的结论；只保留工具结果直接支持的金额和比率，"
+                    "保持来源精度，不要自行计算、汇总、换算、取整或近似。"
+                )
             repair_request = (
-                "数字溯源复核发现以下金额或比率没有本轮工具结果的直接依据："
-                + "；".join(numeric_failures)
-                + "。请修订上一版完整回答：删除这些无依据数字及依赖它们的结论；只保留工具结果直接支持的金额和比率，"
-                  "保持来源精度，不要自行计算、汇总、换算、取整或近似。不得调用工具，不要提及本次复核或输出检查说明。"
+                "请根据以下检查结果修订上一版完整回答："
+                + " ".join(repair_instructions)
+                + "不得调用工具，不要提及本次复核或输出检查说明。"
             )
             self.logger.info(json.dumps({
                 "event": "output_review_repair_requested",
@@ -318,7 +325,10 @@ class Advisor:
                 "intent": intent,
                 "retry_count": retry_count + 1,
                 "failed_checks": ["numeric_provenance"],
-                "reasons": numeric_failures,
+                "reasons": [
+                    reason for check_id, _, reason in failed_checks
+                    if check_id == "numeric_provenance"
+                ],
             }, ensure_ascii=False))
             return {
                 "review_retry_count": retry_count + 1,

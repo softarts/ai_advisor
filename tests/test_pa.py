@@ -85,6 +85,7 @@ def test_month_detail_2025_03(report):
     assert d["composition"] is not None
     derivs = next(x for x in d["composition"] if x["category"] == "derivatives_merged")
     assert pytest.approx(3.32, abs=0.01) == derivs["pp"]
+    assert pytest.approx(derivs["pp"], abs=0.000001) == d["contribution_pp"]["derivatives_merged"]
 
     cc = d["cash_category"]
     assert cc is not None
@@ -105,6 +106,9 @@ def test_month_detail_2025_04(report):
     assert pytest.approx(-17.91, abs=0.01) == d["contribution_pp"]["sum"]
     assert d["contribution_pp"]["consistency"] == "inconsistent"
     assert pytest.approx(-14.16, abs=0.01) == d["contribution_pp"]["twr_gap_pp"]
+    assert pytest.approx(-28.6356, abs=0.0001) == d["contribution_pp"]["derivatives_merged"]
+    assert "PA 原始类别贡献仍可报告" in d["composition_unavailable_reason"]
+    assert "不提供品种拆分" not in d["composition_unavailable_reason"]
 
     assert pytest.approx(499814, abs=2) == d["nav"]["opening"]
     assert pytest.approx(481087, abs=2) == d["nav"]["closing"]

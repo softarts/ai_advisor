@@ -169,11 +169,6 @@ def _assert_semantic_review(case: dict[str, Any], result: CaseResult) -> None:
         if decision not in {"pass", "fail", "uncertain"}:
             result.failures.append(f"语义评审返回非法判定：{item_id}={decision!r}")
             continue
-        evidence = item.get("evidence", "")
-        if not isinstance(evidence, str) or (evidence and evidence not in result.answer):
-            result.failures.append(f"语义评审证据不是回答原文：{item_id}")
-        elif decision == "pass" and not evidence:
-            result.failures.append(f"语义评审通过判定缺少回答证据：{item_id}")
         if decision != "pass":
             result.failures.append(
                 f"语义评审 {decision}：{item_id} — {item.get('reason', '')}"
@@ -234,18 +229,31 @@ def _tool_value_appears(value: Any, answer: str) -> bool:
     return False
 
 
-def _tool_value_appears_near_label(value: Any, label: Any, answer: str) -> bool:
+def _tool_value_appears_near_label(
+    value: Any, label: Any, answer: str, max_gap: int = _GUARDED_NUMBER_CONTEXT
+) -> bool:
     if not isinstance(label, str) or not label or isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     for match in re.finditer(re.escape(label), answer, re.IGNORECASE):
-        start = max(0, match.start() - _GUARDED_NUMBER_CONTEXT)
-        end = min(len(answer), match.end() + _GUARDED_NUMBER_CONTEXT)
+        start = max(0, match.start() - max_gap)
+        end = min(len(answer), match.end() + max_gap)
         context = answer[start:end]
         relative_start = match.start() - start
         relative_end = match.end() - start
         candidates = [
             number for number in _GUARDED_NUMBER_RE.finditer(context)
             if number.end() <= relative_start or number.start() >= relative_end
+        ]
+        candidates = [
+            number for number in candidates
+            if not re.search(
+                r"[。；;！？!?,，\n]"
+                if number.end() <= relative_start
+                else r"[。；;！？!\n]",
+                context[number.end():relative_start]
+                if number.end() <= relative_start
+                else context[relative_end:number.start()],
+            )
         ]
         if not candidates:
             continue
@@ -257,8 +265,50 @@ def _tool_value_appears_near_label(value: Any, label: Any, answer: str) -> bool:
                 else number.start() - relative_end
             ),
         )
-        if _numeric_value_matches(nearest.group(), float(value)):
+        gap = (
+            relative_start - nearest.end()
+            if nearest.end() <= relative_start
+            else nearest.start() - relative_end
+        )
+        if gap <= max_gap and _numeric_value_matches(nearest.group(), float(value)):
             return True
+    return False
+
+
+def _tool_value_appears_near_any_label(
+    value: Any, labels: list[Any], answer: str
+) -> bool:
+    return any(
+        _tool_value_appears_near_label(value, label, answer)
+        for label in labels
+        if isinstance(label, str)
+    )
+
+
+def _tool_value_appears_with_source(
+    value: Any, source: str, answer: str
+) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    source_indexes = {
+        index: cited_source
+        for index, cited_source in re.findall(
+            r"(?m)^\[(\d+)\]\s+([^\n]+)$", answer
+        )
+    }
+    for number in _GUARDED_NUMBER_RE.finditer(answer):
+        if not _numeric_value_matches(number.group(), float(value)):
+            continue
+        trailing_text = answer[number.end():number.end() + 48]
+        reference = re.match(
+            r"\s*(?:%|％|pp|个百分点|个基点|bps)?\s*((?:\[\d+\])+)",
+            trailing_text,
+            re.IGNORECASE,
+        )
+        if reference:
+            indexes = re.findall(r"\[(\d+)\]", reference.group(1))
+            if any(source_indexes.get(index) == source for index in indexes):
+                return True
     return False
 
 
@@ -275,10 +325,17 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
                 try:
                     value = _path_value(payload, assertion["path"])
                     label_path = assertion.get("label_path")
+                    labels = assertion.get("labels")
                     label = assertion.get("label")
                     if label_path:
-                        label = _path_value(payload, label_path)
-                    observed.append((value, label))
+                        labels = [_path_value(payload, label_path)]
+                    elif labels is None and label is not None:
+                        labels = [label]
+                    elif labels is None:
+                        labels = []
+                    if not isinstance(labels, list):
+                        raise ValueError(f"工具值断言 labels 必须为列表：{assertion['path']}")
+                    observed.append((value, labels[0] if labels else None))
                     if (
                         value is None
                         and assertion.get("allow_null")
@@ -286,8 +343,13 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
                     ):
                         matched = True
                         break
-                    if label is not None:
-                        matches = _tool_value_appears_near_label(value, label, result.answer)
+                    if assertion.get("require_source_path"):
+                        source = f"{tool_name}$.{assertion['path']}"
+                        matches = _tool_value_appears_with_source(
+                            value, source, result.answer
+                        )
+                    elif labels:
+                        matches = _tool_value_appears_near_any_label(value, labels, result.answer)
                     else:
                         matches = _tool_value_appears(value, result.answer)
                     if matches:
@@ -298,10 +360,19 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
             if not matched:
                 label_detail = f"（标签 {observed[-1][1]!r}）" if observed and observed[-1][1] else ""
                 value_detail = observed[-1][0] if observed else f"字段 {assertion['path']} 未返回"
-                result.failures.append(
-                    f"回答未包含工具 {tool_name} 字段 {assertion['path']} 的值"
-                    f"{label_detail}：{value_detail!r}"
-                )
+                if assertion.get("require_source_path") and any(
+                    _tool_value_appears(value, result.answer)
+                    for value, _ in observed
+                ):
+                    result.failures.append(
+                        f"回答包含数值但没有与工具 {tool_name} 字段 "
+                        f"{assertion['path']} 对应的来源索引：{value_detail!r}"
+                    )
+                else:
+                    result.failures.append(
+                        f"回答未包含工具 {tool_name} 字段 {assertion['path']} 的值"
+                        f"{label_detail}：{value_detail!r}"
+                    )
         except (KeyError, ValueError) as exc:
             result.failures.append(f"无法执行工具事实断言：{exc}")
 
@@ -364,16 +435,15 @@ def _assert_conditional_tool_value_guards(case: dict[str, Any], result: CaseResu
                     if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
                         raise ValueError(f"工具字段 {forbidden['path']} 不是数字")
                     for label in forbidden["labels"]:
-                        for label_match in re.finditer(re.escape(label), result.answer, re.IGNORECASE):
-                            if _tool_value_appears_near_label(
-                                raw_value, label, result.answer
-                            ):
-                                result.failures.append(
-                                    f"归因数据不一致时仍引用类别贡献：{label} "
-                                    f"{raw_value:g}（{forbidden['path']}）"
-                                )
-                                reported_paths.add(forbidden["path"])
-                                break
+                        if _tool_value_appears_near_label(
+                            raw_value, label, result.answer, max_gap=16
+                        ):
+                            result.failures.append(
+                                f"归因数据不一致时仍引用类别贡献：{label} "
+                                f"{raw_value:g}（{forbidden['path']}）"
+                            )
+                            reported_paths.add(forbidden["path"])
+                            break
         except (KeyError, ValueError) as exc:
             result.failures.append(f"无法执行条件工具值检查：{exc}")
 

@@ -73,11 +73,37 @@ def _dq12_tool_result(contributions=None):
             "futures_options": -16.348891819,
             "future_style_options": 0.0,
             "cash": 10.727310563,
+            "derivatives_merged": -28.635594666,
             "sum": -17.908284103,
             "twr_gap_pp": -14.16149678,
             **(contributions or {}),
         },
     })
+
+
+def _dq12_answer():
+    return (
+        "| PA 类别 | 贡献（百分点） |\n"
+        "|--------|----------------|\n"
+        "| 期货 | **-12.29 pp [1]** |\n"
+        "| 期货期权 | **-16.35 pp [2]** |\n"
+        "| 现金 | **+10.73 pp [3]** |\n"
+        "| 合并衍生品 | **-28.64 pp [4]** |\n"
+        "| 类别合计 | **-17.91 pp [5]** |\n"
+        "TWR 为 -3.75% [6]；"
+        "与 TWR 的差值为 -14.16 pp [7]。\n"
+        "类别合计与 TWR 不一致，说明这些类别值不能作为整体 TWR 的完整对账拆分，"
+        "也不能据此估算各类 SGD 盈亏或确定整体亏损原因。期货与期货期权可能因行权发生类别转移，"
+        "但这些月度数据不能证明本月发生行权或两类来自同一合约；类别贡献也不等于已实现交易盈亏。\n\n"
+        "数字来源：\n"
+        "[1] get_month_detail$.contribution_pp.futures\n"
+        "[2] get_month_detail$.contribution_pp.futures_options\n"
+        "[3] get_month_detail$.contribution_pp.cash\n"
+        "[4] get_month_detail$.contribution_pp.derivatives_merged\n"
+        "[5] get_month_detail$.contribution_pp.sum\n"
+        "[6] get_month_detail$.return.twr_pct\n"
+        "[7] get_month_detail$.contribution_pp.twr_gap_pp"
+    )
 
 
 class CaseLoadingTests(unittest.TestCase):
@@ -103,9 +129,8 @@ class CaseLoadingTests(unittest.TestCase):
 
     def test_data_query_prompt_prioritizes_concise_explanation_when_attribution_is_unavailable(self):
         prompt = (ROOT / "prompts" / "data_query.compose.md").read_text(encoding="utf-8")
-        self.assertIn("本节优先于下方五段式结构", prompt)
-        self.assertIn("归因类别数据与整体收益对不上", prompt)
-        self.assertIn("不要报告任何类别贡献数字", prompt)
+        self.assertIn("仍可忠实报告 PA 原始类别贡献", prompt)
+        self.assertIn("不能作为整体 TWR 的完整对账拆分", prompt)
 
 
 class AssertionTests(unittest.TestCase):
@@ -180,16 +205,21 @@ class AssertionTests(unittest.TestCase):
             name=case["name"],
             intent=case["intent"],
             question=case["question"],
-            answer=(
-                "2025-04 TWR -3.75%。归因类别合计与 TWR 不一致，"
-                "因此不能据此判断亏损来自哪些类别。"
-            ),
+            answer=_dq12_answer(),
             actual_tools=["get_month_detail"],
             tool_results=[_dq12_tool_result()],
             review={"passed": True, "failed_checks": [], "unavailable_checks": []},
         )
         evaluate_case(case, result)
         self.assertEqual(result.failures, [])
+        self.assertTrue(all(
+            assertion.get("require_source_path")
+            for assertion in case["tool_value_assertions"]
+        ))
+        self.assertTrue(all(
+            "label" not in assertion and "labels" not in assertion
+            for assertion in case["tool_value_assertions"]
+        ))
 
     def test_dq12_accepts_the_user_reported_answer_phrasing(self):
         case = load_cases(["DQ12"])[0]
@@ -198,10 +228,7 @@ class AssertionTests(unittest.TestCase):
             name=case["name"],
             intent=case["intent"],
             question=case["question"],
-            answer=(
-                "TWR 为 -3.75%。品种贡献总计与 TWR 相差 -14.16 个百分点，"
-                "超出系统阈值。因自洽检查未通过，不能可靠地告诉我们亏损具体来自哪些资产类别。"
-            ),
+            answer=_dq12_answer(),
             actual_tools=["get_month_detail"],
             tool_results=[_dq12_tool_result()],
             review={"passed": True, "failed_checks": [], "unavailable_checks": []},
@@ -220,13 +247,37 @@ class AssertionTests(unittest.TestCase):
             intent=case["intent"],
             question=case["question"],
             answer=(
-                "TWR 为 -3.75%。品类贡献总计与 TWR 不一致。"
-                "不能据此断定亏损源于哪些合约或交易。"
-                "亏损主要是由于市场整体回调加上账户内部组合的表现略逊于基准 SPXTR。"
+                _dq12_answer()
+                + "亏损主要是由于市场整体回调加上账户内部组合的表现略逊于基准 SPXTR。"
             ),
             actual_tools=["get_month_detail"],
             tool_results=[_dq12_tool_result()],
             review={"passed": True, "failed_checks": [], "unavailable_checks": []},
+            semantic_review={
+                "status": "completed",
+                "results": [
+                    {
+                        "id": "identify-attribution-inconsistency",
+                        "decision": "pass",
+                        "reason": "说明归因不一致且无法据此确定具体原因。",
+                        "evidence": "品类贡献总计与 TWR 不一致。",
+                    },
+                    {
+                        "id": "avoid-unsupported-loss-causality",
+                        "decision": "fail",
+                        "reason": "将亏损归因于市场回调和组合表现。",
+                        "evidence": (
+                            "亏损主要是由于市场整体回调加上账户内部组合的表现略逊于基准 SPXTR。"
+                        ),
+                    },
+                    {
+                        "id": "explain-derivative-classification",
+                        "decision": "pass",
+                        "reason": "说明两类之间可能有行权造成的分类转移。",
+                        "evidence": "期货与期货期权可能因行权发生类别转移",
+                    },
+                ],
+            },
         )
         evaluate_case(case, result)
         self.assertFalse(
@@ -234,74 +285,42 @@ class AssertionTests(unittest.TestCase):
             result.failures,
         )
         self.assertTrue(
-            any("主要是由于市场整体回调" in failure for failure in result.failures),
-            result.failures,
-        )
-        self.assertTrue(
-            any("账户内部组合的表现略逊于基准" in failure for failure in result.failures),
+            any("语义评审 fail：avoid-unsupported-loss-causality" in failure for failure in result.failures),
             result.failures,
         )
 
-    def test_dq12_rejects_category_contribution_after_consistency_gate_fails(self):
+    def test_dq12_accepts_original_category_contributions_with_reconciliation_caveat(self):
         case = load_cases(["DQ12"])[0]
-        answer = (
-            "TWR 为 -3.75%。期货贡献 -12.29 pp，期货/期权合并 -16.35 pp，现金类贡献 +10.73 pp。"
-            "归因类别合计与 TWR 相差 -14.16 个百分点，因此不能据此判断亏损来自哪些类别。"
-            "主要受期货和合并的期货/期权拖累。"
-        )
         result = self._result(
             case_id="DQ12",
             name=case["name"],
             intent=case["intent"],
             question=case["question"],
-            answer=answer,
+            answer=_dq12_answer(),
             actual_tools=["get_month_detail"],
             tool_results=[_dq12_tool_result()],
             review={"passed": True, "failed_checks": [], "unavailable_checks": []},
         )
         evaluate_case(case, result)
-        self.assertTrue(
-            any("归因数据不一致时仍引用类别贡献：期货 -12.2867" in failure for failure in result.failures),
-            result.failures,
-        )
-        self.assertTrue(
-            any("归因数据不一致时仍引用类别贡献：现金类 10.7273" in failure for failure in result.failures),
-            result.failures,
-        )
-        self.assertTrue(
-            any("归因数据不一致时仍引用类别贡献：期货/期权 -16.3489" in failure for failure in result.failures),
-            result.failures,
-        )
-        self.assertTrue(
-            any("包含禁止出现的内容：主要受期货和合并的期货/期权拖累" in failure for failure in result.failures),
-            result.failures,
-        )
-        self.assertFalse(
-            any("缺少必须包含的内容" in failure for failure in result.failures),
-            result.failures,
-        )
+        self.assertEqual(result.failures, [])
 
-    def test_dq12_does_not_block_unrelated_occurrence_of_contribution_value(self):
+    def test_dq12_rejects_missing_number_source_pair(self):
         case = load_cases(["DQ12"])[0]
         result = self._result(
             case_id="DQ12",
             name=case["name"],
             intent=case["intent"],
             question=case["question"],
-            answer=(
-                "TWR 为 -3.75%。期货贡献不提供数值。"
-                "归因类别合计与 TWR 不一致，因此不能据此判断亏损来自哪些类别。"
-                "账户现金余额为 10.73 SGD。"
+            answer=_dq12_answer().replace(
+                "get_month_detail$.contribution_pp.futures",
+                "get_month_detail$.contribution_pp.stocks",
             ),
             actual_tools=["get_month_detail"],
-            tool_results=[_dq12_tool_result({"futures": 10.73, "cash": 0.0})],
+            tool_results=[_dq12_tool_result()],
             review={"passed": True, "failed_checks": [], "unavailable_checks": []},
         )
         evaluate_case(case, result)
-        self.assertFalse(
-            any("归因数据不一致时仍引用类别贡献" in failure for failure in result.failures),
-            result.failures,
-        )
+        self.assertTrue(any("没有与工具 get_month_detail 字段 contribution_pp.futures 对应的来源索引" in failure for failure in result.failures))
 
     def test_forbidden_phrase_inside_a_negation_is_not_reported(self):
         case = {
@@ -745,6 +764,95 @@ class RouterParsingTests(unittest.TestCase):
 
 
 class ToolFactAssertionTests(unittest.TestCase):
+    def test_tool_value_assertion_matches_label_and_value_in_markdown_table_row(self):
+        answer = (
+            "| PA 类别 | 贡献（百分点） |\n"
+            "|--------|----------------|\n"
+            "| 期货 | **-12.29 pp〔来源：工具字段〕** |\n"
+        )
+        result = CaseResult(
+            "DQ12", "monthly attribution", "data_query", "q",
+            answer,
+            actual_tools=["get_month_detail"],
+            tool_results=[
+                _tool_result("get_month_detail", {
+                    "contribution_pp": {"futures": -12.286702847}
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_month_detail"],
+                "tool_value_assertions": [{
+                    "tool": "get_month_detail",
+                    "path": "contribution_pp.futures",
+                    "label": "期货",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertEqual(result.failures, [])
+
+    def test_tool_value_assertion_does_not_match_value_from_another_table_row(self):
+        answer = (
+            "| 股票 | **-12.29 pp** |\n"
+            "| 期货 | **+10.73 pp** |\n"
+        )
+        result = CaseResult(
+            "DQ12", "monthly attribution", "data_query", "q",
+            answer,
+            actual_tools=["get_month_detail"],
+            tool_results=[
+                _tool_result("get_month_detail", {
+                    "contribution_pp": {"futures": -12.286702847}
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_month_detail"],
+                "tool_value_assertions": [{
+                    "tool": "get_month_detail",
+                    "path": "contribution_pp.futures",
+                    "label": "期货",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("回答未包含工具" in failure for failure in result.failures))
+
+    def test_tool_value_assertion_skips_nearer_number_from_previous_sentence(self):
+        answer = "YTD 盈亏 +92,088.92。股票/ETF 估算 +4,669.06 SGD。"
+        result = CaseResult(
+            "DQ05", "attribution", "data_query", "q",
+            answer,
+            actual_tools=["get_attribution"],
+            tool_results=[
+                _tool_result("get_attribution", {
+                    "value": {
+                        "buckets": [
+                            {"label": "股票/ETF", "amount": 4669.0555520049165}
+                        ]
+                    }
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_attribution"],
+                "tool_value_assertions": [{
+                    "tool": "get_attribution",
+                    "path": "value.buckets.0.amount",
+                    "label_path": "value.buckets.0.label",
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertEqual(result.failures, [])
+
     def test_tool_value_assertion_checks_value_near_dynamic_label(self):
         result = CaseResult(
             "DQ01", "extrema", "data_query", "q",
@@ -777,6 +885,67 @@ class ToolFactAssertionTests(unittest.TestCase):
         }
         _evaluate_case(case, result)
         self.assertEqual(result.failures, [])
+
+    def test_tool_value_assertion_accepts_alternative_natural_labels(self):
+        result = CaseResult(
+            "DQ12", "attribution", "data_query", "q",
+            "期货/期权 -16.35 pp；类别合计与 TWR 差 -14.16 pp。",
+            actual_tools=["get_month_detail"],
+            tool_results=[
+                _tool_result("get_month_detail", {
+                    "contribution_pp": {
+                        "futures_options": -16.348891819,
+                        "twr_gap_pp": -14.16149678,
+                    }
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_month_detail"],
+                "tool_value_assertions": [
+                    {
+                        "tool": "get_month_detail",
+                        "path": "contribution_pp.futures_options",
+                        "labels": ["期货期权", "期货/期权"],
+                    },
+                    {
+                        "tool": "get_month_detail",
+                        "path": "contribution_pp.twr_gap_pp",
+                        "labels": ["相差", "差"],
+                    },
+                ],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertEqual(result.failures, [])
+
+    def test_tool_value_assertion_requires_the_matching_source_path_when_requested(self):
+        result = CaseResult(
+            "DQ12", "attribution", "data_query", "q",
+            "-12.29 pp [1]\n\n数字来源：\n"
+            "[1] get_month_detail$.contribution_pp.derivatives_merged",
+            actual_tools=["get_month_detail"],
+            tool_results=[
+                _tool_result("get_month_detail", {
+                    "contribution_pp": {"futures": -12.286702847}
+                })
+            ],
+        )
+        _evaluate_case(
+            {
+                "expected_tools": ["get_month_detail"],
+                "tool_value_assertions": [{
+                    "tool": "get_month_detail",
+                    "path": "contribution_pp.futures",
+                    "require_source_path": True,
+                }],
+                "check_numbers_grounded": False,
+            },
+            result,
+        )
+        self.assertTrue(any("没有与工具 get_month_detail 字段 contribution_pp.futures 对应的来源索引" in failure for failure in result.failures))
 
     def test_tool_value_assertion_rejects_value_attached_to_wrong_label(self):
         result = CaseResult(
@@ -829,7 +998,7 @@ class ToolFactAssertionTests(unittest.TestCase):
 
 
 class SemanticJudgeTests(unittest.TestCase):
-    def test_judge_validates_structured_response_and_source_evidence(self):
+    def test_judge_validates_semantic_decision_without_requiring_verbatim_evidence(self):
         from eval.semantic_judge import review_case
 
         rubric = [{"id": "cause-boundary", "criterion": "不得作无依据因果归因"}]
@@ -875,24 +1044,95 @@ class SemanticJudgeTests(unittest.TestCase):
                 [{"tool": "get_capabilities", "paths": ["value.period"]}],
             )
 
-    def test_judge_rejects_evidence_not_present_in_answer(self):
-        from eval.semantic_judge import SemanticJudgeError, review_case
+    def test_judge_does_not_change_semantic_decision_for_paraphrased_evidence(self):
+        from eval.semantic_judge import review_case
 
-        rubric = [{"id": "cause-boundary", "criterion": "不得作无依据因果归因"}]
+        rubric = [
+            {"id": "identify-inconsistency", "criterion": "说明归因数据不一致"},
+            {"id": "cause-boundary", "criterion": "不得作无依据因果归因"},
+        ]
         content = json.dumps({
-            "results": [{
-                "id": "cause-boundary",
-                "decision": "pass",
-                "evidence": "not quoted",
-                "reason": "理由",
-            }]
-        })
+            "results": [
+                {
+                    "id": "identify-inconsistency",
+                    "decision": "pass",
+                    "evidence": "not quoted",
+                    "reason": "理由",
+                },
+                {
+                    "id": "cause-boundary",
+                    "decision": "pass",
+                    "evidence": "无法根据归因确定亏损原因",
+                    "reason": "回答没有作出因果推断",
+                },
+            ]
+        }, ensure_ascii=False)
         response = MagicMock()
         response.json.return_value = {"choices": [{"message": {"content": content}}]}
         response.raise_for_status.return_value = None
         with patch("eval.semantic_judge.httpx.post", return_value=response):
-            with self.assertRaises(SemanticJudgeError):
-                review_case("DQ12", "q", "答案", [], rubric)
+            reviewed = review_case(
+                "DQ12",
+                "q",
+                "归因数据不一致。无法根据归因确定亏损原因。",
+                [],
+                rubric,
+            )
+        self.assertEqual(reviewed["status"], "completed")
+        self.assertEqual(reviewed["results"][0]["decision"], "pass")
+        self.assertEqual(reviewed["results"][0]["evidence"], "not quoted")
+        self.assertEqual(reviewed["results"][1]["decision"], "pass")
+
+    def test_judge_does_not_retry_for_non_verbatim_or_other_language_evidence(self):
+        from eval.semantic_judge import review_case
+
+        rubric = [{"id": "identify-inconsistency", "criterion": "说明归因数据不一致"}]
+        invalid = json.dumps({
+            "results": [{
+                "id": "identify-inconsistency",
+                "decision": "pass",
+                "evidence": "The answer identifies the inconsistency.",
+                "reason": "The response says that the values do not reconcile.",
+            }]
+        })
+        response = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": invalid}}]}
+        response.raise_for_status.return_value = None
+        with patch("eval.semantic_judge.httpx.post", return_value=response) as post:
+            reviewed = review_case(
+                "DQ12",
+                "q",
+                "类别贡献与 TWR 不一致，无法作为完整对账拆分。",
+                [],
+                rubric,
+            )
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(reviewed["results"][0]["decision"], "pass")
+        self.assertEqual(
+            reviewed["results"][0]["evidence"],
+            "The answer identifies the inconsistency.",
+        )
+
+    def test_judge_matches_evidence_with_unicode_whitespace_variants(self):
+        from eval.semantic_judge import review_case
+
+        rubric = [{"id": "attribution-boundary", "criterion": "说明不能可靠归因"}]
+        content = json.dumps({
+            "results": [{
+                "id": "attribution-boundary",
+                "decision": "pass",
+                "evidence": "无法可靠地判断\n亏损来源。",
+                "reason": "回答指出限制",
+            }]
+        }, ensure_ascii=False)
+        response = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": content}}]}
+        response.raise_for_status.return_value = None
+        answer = "无法可靠地判断 亏损来源。\u00a0更多说明。"
+        with patch("eval.semantic_judge.httpx.post", return_value=response):
+            reviewed = review_case("DQ12", "q", answer, [], rubric)
+        self.assertEqual(reviewed["results"][0]["decision"], "pass")
+        self.assertEqual(reviewed["results"][0]["evidence"], "无法可靠地判断\n亏损来源。")
 
     def test_semantic_fail_remains_a_failure_alongside_deterministic_checks(self):
         result = CaseResult(
@@ -933,7 +1173,7 @@ class SemanticJudgeTests(unittest.TestCase):
         )
         self.assertTrue(any("语义评审未执行" in failure for failure in result.failures))
 
-    def test_semantic_pass_without_evidence_fails_closed(self):
+    def test_semantic_pass_without_optional_evidence_is_accepted(self):
         result = CaseResult(
             "PI01", "capabilities", "product_info", "q", "答案。",
             semantic_review={
@@ -956,7 +1196,7 @@ class SemanticJudgeTests(unittest.TestCase):
             },
             result,
         )
-        self.assertTrue(any("缺少回答证据" in failure for failure in result.failures))
+        self.assertEqual(result.failures, [])
 
 
 class FixedReplyAssertionTests(unittest.TestCase):
