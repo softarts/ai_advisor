@@ -324,18 +324,11 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
             for payload in payloads:
                 try:
                     value = _path_value(payload, assertion["path"])
-                    label_path = assertion.get("label_path")
-                    labels = assertion.get("labels")
-                    label = assertion.get("label")
-                    if label_path:
-                        labels = [_path_value(payload, label_path)]
-                    elif labels is None and label is not None:
-                        labels = [label]
-                    elif labels is None:
-                        labels = []
-                    if not isinstance(labels, list):
-                        raise ValueError(f"工具值断言 labels 必须为列表：{assertion['path']}")
-                    observed.append((value, labels[0] if labels else None))
+                    # label/labels/label_path are documentation only; not used for matching.
+                    # Proximity/position matching is unreliable across models and has been
+                    # removed per solution_design.md eval assertion principles.
+                    # Only check whether the value appears anywhere in the answer.
+                    observed.append((value, None))
                     if (
                         value is None
                         and assertion.get("allow_null")
@@ -348,8 +341,6 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
                         matches = _tool_value_appears_with_source(
                             value, source, result.answer
                         )
-                    elif labels:
-                        matches = _tool_value_appears_near_any_label(value, labels, result.answer)
                     else:
                         matches = _tool_value_appears(value, result.answer)
                     if matches:
@@ -358,7 +349,6 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
                 except ValueError:
                     continue
             if not matched:
-                label_detail = f"（标签 {observed[-1][1]!r}）" if observed and observed[-1][1] else ""
                 value_detail = observed[-1][0] if observed else f"字段 {assertion['path']} 未返回"
                 if assertion.get("require_source_path") and any(
                     _tool_value_appears(value, result.answer)
@@ -371,7 +361,7 @@ def _assert_tool_value_assertions(case: dict[str, Any], result: CaseResult) -> N
                 else:
                     result.failures.append(
                         f"回答未包含工具 {tool_name} 字段 {assertion['path']} 的值"
-                        f"{label_detail}：{value_detail!r}"
+                        f"：{value_detail!r}"
                     )
         except (KeyError, ValueError) as exc:
             result.failures.append(f"无法执行工具事实断言：{exc}")

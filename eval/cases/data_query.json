@@ -15,6 +15,15 @@
         {"tool": "get_monthly_returns", "path": "value.worst_month.account_return_pct", "label_path": "value.worst_month.month"}
       ],
       "must_not": [],
+      "semantic_fact_paths": [
+        {"tool": "get_monthly_returns", "paths": ["value.best_month", "value.worst_month"]}
+      ],
+      "semantic_rubric": [
+        {
+          "id": "monthly-extrema-pairing",
+          "criterion": "应将工具返回的最高收益月份的收益率与该月份名称正确配对，最低收益月份同理；不得将某月的收益率与错误的月份名称搭配，也不得把最高和最低对调。"
+        }
+      ],
       "expect_note": false
     },
     {
@@ -37,13 +46,12 @@
       "expected_tools": ["get_window_summary"],
       "must_include": ["SPXTR", "EFA", "VT"],
       "tool_value_assertions": [
-        {"tool": "get_window_summary", "path": "value.start_nav", "label": "期初"},
-        {"tool": "get_window_summary", "path": "value.end_nav", "label": "期末"},
-        {"tool": "get_window_summary", "path": "value.profit", "label": "盈亏"},
-        {"tool": "get_window_summary", "path": "value.twr_pct", "label": "TWR"},
-        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.SPXTR", "label": "SPXTR"},
-        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.EFA", "label": "EFA"},
-        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.VT", "label": "VT"}
+        {"tool": "get_window_summary", "path": "value.start_nav", "label": "期初（文档用）"},
+        {"tool": "get_window_summary", "path": "value.end_nav", "label": "期末（文档用）"},
+        {"tool": "get_window_summary", "path": "value.twr_pct", "label": "TWR（文档用）"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.SPXTR", "label": "SPXTR（文档用）"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.EFA", "label": "EFA（文档用）"},
+        {"tool": "get_window_summary", "path": "value.benchmark_twr_pct.VT", "label": "VT（文档用）"}
       ],
       "semantic_fact_paths": [
         {
@@ -58,7 +66,7 @@
       "semantic_rubric": [
         {
           "id": "compare-window-benchmarks",
-          "criterion": "应清楚回答账户过去一年的资产变化/投资盈亏，并将账户 TWR 与所问的三个基准作正确比较；不得混淆资产变化、净流入和投资收益。"
+          "criterion": "应清楚回答账户过去一年的资产变化/投资盈亏，并将账户 TWR 与所问的三个基准作正确比较；不得混淆 nav_change（净值变动，含资金流影响）与 profit（投资盈亏，扣除资金流后的真实收益）；应区分两者并正确说明净资金流的影响，不得只报告净值变动而不提投资盈亏。"
         }
       ],
       "expect_note": false
@@ -138,8 +146,7 @@
           "id": "yearly-extrema-pairing",
           "criterion": "应把工具数据中最高和最低年度收益分别与正确年份配对；不得只罗列年份和值却配错，也不得把 TWR 与官方收益口径混为一谈。"
         }
-      ],
-      "expect_note": false
+      ],      "expect_note": false
     },
     {
       "id": "DQ07",
@@ -267,6 +274,10 @@
         {
           "id": "monthly-attribution-boundaries",
           "criterion": "应依据工具报告 PA 类别的原始贡献并区分百分点贡献、估算 SGD 分摊与账户 TWR；说明期货和期货期权可能因行权产生类别转移、提供合并视角但不得断言本月发生行权或具体因果。不得把类别贡献说成已实现盈亏。还应正确说明出入金不是投资收益并遵守其他工具边界。"
+        },
+        {
+          "id": "monthly-attribution-value-pairing",
+          "criterion": "回答中各 PA 类别的贡献数值必须与正确的类别名称配对；期货的百分点贡献不得出现在期货期权行，现金类贡献不得出现在股票/ETF 行，依此类推。数值配对错误视为语义错误，即使数字本身来自工具。"
         }
       ],
       "expect_note": false
@@ -308,6 +319,10 @@
         {
           "id": "explain-derivative-classification",
           "criterion": "应以 PA 口径说明期货和期货期权类别可能因行权发生转移，并提供两类合并视角；不得推断该月确实发生了行权，也不得推断两类必然来自同一合约或事件。"
+        },
+        {
+          "id": "monthly-attribution-value-pairing-dq12",
+          "criterion": "回答中各 PA 类别的贡献数值必须与正确的类别名称配对；期货的百分点贡献不得出现在期货期权行，反之亦然；各类别数值配对错误视为语义错误，即使数字本身来自工具。"
         }
       ],
       "expect_note": false

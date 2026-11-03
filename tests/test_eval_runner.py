@@ -808,34 +808,11 @@ class ToolFactAssertionTests(unittest.TestCase):
         )
         self.assertEqual(result.failures, [])
 
-    def test_tool_value_assertion_does_not_match_value_from_another_table_row(self):
-        answer = (
-            "| 股票 | **-12.29 pp** |\n"
-            "| 期货 | **+10.73 pp** |\n"
-        )
-        result = CaseResult(
-            "DQ12", "monthly attribution", "data_query", "q",
-            answer,
-            actual_tools=["get_month_detail"],
-            tool_results=[
-                _tool_result("get_month_detail", {
-                    "contribution_pp": {"futures": -12.286702847}
-                })
-            ],
-        )
-        _evaluate_case(
-            {
-                "expected_tools": ["get_month_detail"],
-                "tool_value_assertions": [{
-                    "tool": "get_month_detail",
-                    "path": "contribution_pp.futures",
-                    "label": "期货",
-                }],
-                "check_numbers_grounded": False,
-            },
-            result,
-        )
-        self.assertTrue(any("回答未包含工具" in failure for failure in result.failures))
+    # Removed: test_tool_value_assertion_does_not_match_value_from_another_table_row
+    # Proximity/label matching was removed per solution_design.md eval assertion principles.
+    # tool_value_assertions only checks that a value appears anywhere in the answer.
+    # Verifying that a value is paired with the correct label/category is the
+    # responsibility of semantic_rubric (LLM judge), not deterministic proximity rules.
 
     def test_tool_value_assertion_skips_nearer_number_from_previous_sentence(self):
         answer = "YTD 盈亏 +92,088.92。股票/ETF 估算 +4,669.06 SGD。"
@@ -961,32 +938,10 @@ class ToolFactAssertionTests(unittest.TestCase):
         )
         self.assertTrue(any("没有与工具 get_month_detail 字段 contribution_pp.futures 对应的来源索引" in failure for failure in result.failures))
 
-    def test_tool_value_assertion_rejects_value_attached_to_wrong_label(self):
-        result = CaseResult(
-            "DQ01", "extrema", "data_query", "q",
-            "2025-03 为 -4.02%，2025-05 为 4.49%。",
-            actual_tools=["get_monthly_returns"],
-            tool_results=[
-                _tool_result("get_monthly_returns", {
-                    "value": {
-                        "best_month": {"month": "2025-03", "account_return_pct": 4.49},
-                    }
-                })
-            ],
-        )
-        _evaluate_case(
-            {
-                "expected_tools": ["get_monthly_returns"],
-                "tool_value_assertions": [{
-                    "tool": "get_monthly_returns",
-                    "path": "value.best_month.account_return_pct",
-                    "label_path": "value.best_month.month",
-                }],
-                "check_numbers_grounded": False,
-            },
-            result,
-        )
-        self.assertTrue(any("回答未包含工具" in failure for failure in result.failures))
+    # Removed: test_tool_value_assertion_rejects_value_attached_to_wrong_label
+    # Same reason as above: proximity/label matching removed. Whether a value is
+    # attached to the correct label (e.g. 4.49% appearing next to 2025-03 vs 2025-05)
+    # is a semantic pairing question answered by semantic_rubric, not proximity rules.
 
     def test_tool_value_assertion_accepts_matching_value_in_any_tool_call(self):
         result = CaseResult(
