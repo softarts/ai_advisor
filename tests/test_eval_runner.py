@@ -132,6 +132,20 @@ class CaseLoadingTests(unittest.TestCase):
         self.assertIn("仍可忠实报告 PA 原始类别贡献", prompt)
         self.assertIn("不能作为整体 TWR 的完整对账拆分", prompt)
 
+    def test_data_query_prompt_distinguishes_rolling_periods_from_calendar_years(self):
+        prompt = (ROOT / "prompts" / "data_query.compose.md").read_text(encoding="utf-8")
+        self.assertIn("滚动期间（如过去/最近一年）必须查询匹配的滚动窗口", prompt)
+        self.assertIn("自然年汇总只适用于用户明确询问自然年", prompt)
+        self.assertIn("查询了期间和口径相匹配的数据后", prompt)
+
+    def test_window_and_yearly_tool_descriptions_distinguish_period_semantics(self):
+        from pa_analytics.registry import TOOLS
+
+        descriptions = {tool["name"]: tool["description"] for tool in TOOLS}
+        self.assertIn("1Y 表示最近 12 个报告月，不是自然年", descriptions["get_window_summary"])
+        self.assertIn("仅用于用户询问某个自然年", descriptions["get_yearly_table"])
+        self.assertIn("不代表最近/过去 12 个月的滚动期间", descriptions["get_yearly_table"])
+
 
 class AssertionTests(unittest.TestCase):
     def _result(self, **kwargs):

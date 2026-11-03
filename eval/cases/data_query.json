@@ -24,8 +24,8 @@
       "expected_tools": ["get_portfolio_detail"],
       "must_include": ["2026-09", "2026-10"],
       "tool_value_assertions": [
-        {"tool": "get_portfolio_detail", "path": "observations.0.value", "label_path": "observations.0.term_month"},
-        {"tool": "get_portfolio_detail", "path": "observations.1.value", "label_path": "observations.1.term_month"}
+        {"tool": "get_portfolio_detail", "path": "value.observations.0.value", "label_path": "value.observations.0.term_month"},
+        {"tool": "get_portfolio_detail", "path": "value.observations.1.value", "label_path": "value.observations.1.term_month"}
       ],
       "must_not": [],
       "expect_note": false
