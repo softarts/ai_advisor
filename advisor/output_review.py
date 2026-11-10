@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import pycountry
 import httpx
+from langsmith import traceable
 
 from .llm_settings import DEFAULT_TIMEOUT, MAX_REVIEW_TOKENS
 
@@ -601,8 +602,7 @@ def check_product_policy(context: CheckContext) -> CheckOutcome:
         "Content-Type": "application/json",
     }
     url = os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions"
-    response = httpx.post(url, headers=headers, json=payload, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
+    response = _call_product_policy_llm(payload, url, headers)
     message = response.json()["choices"][0]["message"]
     content = message.get("content")
     if not content:
@@ -613,6 +613,13 @@ def check_product_policy(context: CheckContext) -> CheckOutcome:
         passed=verdict["decision"] == "pass",
         reason=verdict["reason"],
     )
+
+
+@traceable(run_type="llm", name="product_policy_llm")
+def _call_product_policy_llm(payload: dict, url: str, headers: dict):
+    response = httpx.post(url, headers=headers, json=payload, timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+    return response
 
 
 CHECK_PLUGINS: dict[str, CheckPlugin] = {

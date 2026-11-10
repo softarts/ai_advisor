@@ -13,6 +13,7 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langchain_core.messages import HumanMessage, ToolMessage
+from langsmith import traceable
 
 from .tools import execute
 from .checklist_config import GLOBAL_CHECKS, GLOBAL_CHECKLIST, INTENT_CHECKLISTS
@@ -97,6 +98,7 @@ class Advisor:
     # LLM node
     # ------------------------------------------------------------------
 
+    @traceable(run_type="llm", name="advisor_llm")
     def _llm(self, state):
         intent = state.get("intent") or "data_query"
         profile = INTENT_PROFILES.get(intent, INTENT_PROFILES["data_query"])
@@ -357,6 +359,7 @@ class Advisor:
             return {}
         return {"messages": [AIMessage(content=context.candidate)]}
 
+    @traceable(run_type="tool", name="advisor_tools")
     def _tools(self, state):
         from langchain_core.messages import ToolMessage
         out = []
@@ -371,6 +374,10 @@ class Advisor:
 
     def ask(self, text, thread_id, trace_id=None):
         self.trace_id = trace_id
+        return self._ask_traced(text, thread_id, trace_id=trace_id)
+
+    @traceable(run_type="chain", name="advisor_ask")
+    def _ask_traced(self, text, thread_id, trace_id=None):
         result = self.graph.invoke(
             {"messages": [HumanMessage(content=text)], "intent": "",
              "review_retry_count": 0, "review_repair_request": ""},

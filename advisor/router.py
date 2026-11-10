@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from langsmith import traceable
 
 from .llm_settings import MAX_COMPLETION_TOKENS
 
@@ -141,6 +142,7 @@ def _extract_json_object(text: str) -> str | None:
     return None
 
 
+@traceable(run_type="llm", name="router_llm")
 def _call_router_llm(user_text: str, logger: logging.Logger, trace_id: str | None) -> str:
     """Call the LLM with no tools and return raw response text."""
     system_prompt = _prompt_path("intent_router.md").read_text(encoding="utf-8")
