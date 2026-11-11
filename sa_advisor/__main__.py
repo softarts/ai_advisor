@@ -1,9 +1,65 @@
 """Entry point: python -m sa_advisor
 
 Strands-SDK-based portfolio advisor REPL.
-No _bootstrap_sdk hackery needed: sa_advisor/ does not shadow the strands package.
+Bootstraps the real strands-agents SDK before any import that needs it,
+because the workspace root contains a local strands/ directory that shadows
+the installed SDK on sys.path.
 """
 from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+
+_WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _bootstrap_strands() -> None:
+    """Make the real strands-agents SDK importable as 'strands'.
+
+    Temporarily removes the workspace from sys.path so the installed SDK is
+    found instead of our local strands/ directory, loads it, then restores
+    sys.path and replants the SDK under the 'strands' name so that all
+    subsequent 'from strands import ...' calls resolve correctly.
+    """
+    # Already done (e.g. called twice or SDK already registered correctly).
+    existing = sys.modules.get("strands")
+    if existing is not None and "site-packages" in (getattr(existing, "__file__", "") or ""):
+        return
+
+    def _is_workspace(p: str) -> bool:
+        if not p:
+            return True
+        try:
+            return os.path.realpath(p) == os.path.realpath(_WORKSPACE)
+        except Exception:
+            return False
+
+    _orig_path = sys.path[:]
+    # Remove workspace so the installed SDK wins.
+    sys.path = [p for p in sys.path if not _is_workspace(p)]
+
+    # Stash any local strands.* modules registered so far.
+    _shadowed = {k: sys.modules.pop(k) for k in list(sys.modules)
+                 if k == "strands" or k.startswith("strands.")}
+    try:
+        import strands as _sdk  # the real installed SDK
+        # Register SDK under _strands_sdk alias for strands/__main__ compatibility.
+        sys.modules["_strands_sdk"] = _sdk
+        # Keep all SDK submodules registered so 'from strands.models.openai import ...' works.
+    except Exception as exc:
+        # Restore and bail — imports will fail with the real error downstream.
+        sys.path = _orig_path
+        for k, v in _shadowed.items():
+            sys.modules[k] = v
+        return
+    finally:
+        sys.path = _orig_path
+    # At this point strands → SDK in sys.modules; keep it there.
+    # (We do NOT restore _shadowed here — the SDK stays as 'strands'.)
+
+
+_bootstrap_strands()
 
 import argparse
 import json
@@ -103,6 +159,8 @@ def main() -> None:
             args.user_id,
             timezone_name=os.environ.get("APP_TIMEZONE", "Asia/Singapore"),
             data_as_of=lambda: store.current().period_end,
+            db_path=args.db,
+            raw_dir=args.raw_dir,
         )
 
     thread_id = uuid.uuid4().hex

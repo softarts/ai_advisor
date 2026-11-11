@@ -81,9 +81,11 @@ class StrandsAdvisor:
         user_id: str = "default",
         timezone_name: str | None = None,
         data_as_of=None,
+        db_path: str = "data/pa.db",
+        raw_dir: str = "data/raw",
     ):
         self._advisor_tools = {t.name: t for t in tools}
-        self._strands_tools = {t.tool_name: t for t in wrap_tools(tools)}
+        self._strands_tools = {t.tool_name: t for t in wrap_tools(tools, db_path, raw_dir)}
         self.logger = logger
         self.user_id = user_id
         self.timezone_name = timezone_name or os.environ.get("APP_TIMEZONE", "Asia/Singapore")

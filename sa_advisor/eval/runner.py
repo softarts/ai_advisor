@@ -441,6 +441,8 @@ def main(argv: list[str]) -> int:
         logger,
         timezone_name=os.environ.get("APP_TIMEZONE", "Asia/Singapore"),
         data_as_of=lambda: store.current().period_end,
+        db_path=args.db,
+        raw_dir=args.raw_dir,
     )
 
     results: list[CaseResult] = []
