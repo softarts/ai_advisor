@@ -1,0 +1,5 @@
+OK: advisor/ does not import from common/
+advisor.tools.execute OK
+advisor.router INTENT_PROFILES OK
+
+advisor/ untouched checks PASSED
