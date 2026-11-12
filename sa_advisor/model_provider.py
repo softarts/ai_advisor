@@ -42,40 +42,22 @@ from strands.models.openai import OpenAIModel
 # compatible endpoints).  Suppress it so the REPL stays clean.
 logging.getLogger("strands.models.openai").setLevel(logging.ERROR)
 
-# HTTP client configuration for better connection handling
+# OpenAI client configuration
 DEFAULT_TIMEOUT = 120.0
 MAX_RETRIES = 3
 CONNECT_TIMEOUT = 30.0
 
 
 def get_model() -> OpenAIModel:
-    """Return an OpenAIModel configured from environment variables.
-    
-    Configures HTTP client with:
-    - Explicit timeouts to prevent connection drops
-    - Connection pool limits to avoid resource exhaustion
-    - Retry behavior for transient failures
-    """
+    """Return an OpenAIModel configured from environment variables."""
     import httpx
-    
-    # Configure HTTP client with timeouts and connection limits
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(
-            DEFAULT_TIMEOUT,
-            connect=CONNECT_TIMEOUT,
-        ),
-        limits=httpx.Limits(
-            max_keepalive_connections=5,
-            max_connections=10,
-            keepalive_expiry=60.0,
-        ),
-    )
-    
+
     return OpenAIModel(
         client_args={
             "api_key": os.environ["LLM_API_KEY"],
             "base_url": os.environ["LLM_BASE_URL"],
-            "http_client": http_client,
+            "timeout": httpx.Timeout(DEFAULT_TIMEOUT, connect=CONNECT_TIMEOUT),
+            "max_retries": MAX_RETRIES,
         },
         model_id=os.environ["LLM_MODEL"],
     )
