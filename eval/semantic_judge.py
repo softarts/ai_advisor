@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -56,15 +57,48 @@ def select_tool_facts(
 
 
 def _request_review(payload: dict[str, Any], url: str, headers: dict[str, str]) -> dict[str, Any]:
-    try:
-        response = httpx.post(url, headers=headers, json=payload, timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise SemanticJudgeError(f"语义评审请求或响应无效：{exc}") from exc
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
-        raise SemanticJudgeError("语义评审响应缺少 results 数组")
-    return parsed
+    """Send review request with retry logic for transient network failures."""
+    import time
+    
+    max_retries = 3
+    retry_delay = 2.0
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            # Configure client with connection pool and timeouts
+            with httpx.Client(
+                timeout=httpx.Timeout(DEFAULT_TIMEOUT, connect=30.0),
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            ) as client:
+                response = client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                parsed = json.loads(response.json()["choices"][0]["message"]["content"])
+                
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
+                raise SemanticJudgeError("语义评审响应缺少 results 数组")
+            return parsed
+            
+        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.ConnectTimeout) as exc:
+            # Retry on network-level errors
+            last_error = exc
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (attempt + 1)
+                logging.getLogger(__name__).warning(
+                    f"语义评审网络错误 (attempt {attempt + 1}/{max_retries}): {exc}, "
+                    f"retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+                continue
+            raise SemanticJudgeError(
+                f"语义评审请求失败（重试 {max_retries} 次后）：{exc}"
+            ) from exc
+            
+        except (httpx.HTTPStatusError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            # Don't retry on HTTP status errors or parsing errors
+            raise SemanticJudgeError(f"语义评审请求或响应无效：{exc}") from exc
+    
+    raise SemanticJudgeError(f"语义评审请求失败：{last_error}") from last_error
 
 
 def _validate_results(

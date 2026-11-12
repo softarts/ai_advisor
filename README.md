@@ -419,3 +419,6 @@ python eval/offline_selfcheck.py
 ### 评测运行器
 
 新增 `eval/`，用固定问题集驱动真实 Agent，判定全部由代码完成并输出通过率。详见上方“评测运行器”。
+
+https://d-9667a4c099.awsapps.com/start
+ap-southeast-1

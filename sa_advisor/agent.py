@@ -73,6 +73,10 @@ class StrandsAdvisor:
     Maintains one Strands Agent per conversation thread so multi-turn history
     is preserved natively via agent.messages.
     """
+    
+    # Execution limits to prevent infinite loops
+    MAX_REPAIR_ATTEMPTS = 2  # Maximum output review repair cycles
+    MAX_EXECUTION_TIME = 180.0  # Maximum seconds for a single ask() call
 
     def __init__(
         self,
@@ -109,7 +113,13 @@ class StrandsAdvisor:
     # ------------------------------------------------------------------
 
     def ask(self, text: str, thread_id: str, trace_id: str | None = None) -> str:
-        """Process a user question and return the answer string."""
+        """Process a user question and return the answer string.
+        
+        Includes execution time limit to prevent infinite loops.
+        """
+        import time
+        start_time = time.time()
+        
         intent = classify_intent(text, self.logger, trace_id)
 
         if intent == "unsupported":
@@ -124,6 +134,18 @@ class StrandsAdvisor:
         result = agent(text)
         candidate = _extract_text(result)
 
+        # Check execution time before output review
+        elapsed = time.time() - start_time
+        if elapsed > self.MAX_EXECUTION_TIME * 0.8:
+            self.logger.warning(json.dumps({
+                "event": "execution_time_warning",
+                "trace_id": trace_id,
+                "elapsed_seconds": elapsed,
+                "limit": self.MAX_EXECUTION_TIME,
+                "message": "Approaching execution time limit, skipping output review",
+            }, ensure_ascii=False))
+            return candidate
+
         candidate = self._run_output_review(
             agent=agent,
             intent=intent,
@@ -131,6 +153,7 @@ class StrandsAdvisor:
             candidate=candidate,
             trace_id=trace_id,
             repair_count=0,
+            start_time=start_time,
         )
         return candidate
 
@@ -212,8 +235,39 @@ class StrandsAdvisor:
         candidate: str,
         trace_id: str | None,
         repair_count: int,
+        start_time: float | None = None,
     ) -> str:
+        """Run output review checks with execution time limit.
+        
+        Args:
+            agent: The Strands Agent instance
+            intent: Intent classification
+            question: User question
+            candidate: Generated answer
+            trace_id: Trace ID for logging
+            repair_count: Number of repair attempts so far
+            start_time: Start time of the ask() call (for timeout check)
+        
+        Returns:
+            Reviewed (and possibly repaired) answer
+        """
+        import time
+        
         if not candidate.strip():
+            return candidate
+
+        # Check execution time limit
+        if start_time is None:
+            start_time = time.time()
+        elapsed = time.time() - start_time
+        if elapsed > self.MAX_EXECUTION_TIME:
+            self.logger.warning(json.dumps({
+                "event": "execution_timeout",
+                "trace_id": trace_id,
+                "elapsed_seconds": elapsed,
+                "limit": self.MAX_EXECUTION_TIME,
+                "message": "Execution time limit exceeded, returning candidate as-is",
+            }, ensure_ascii=False))
             return candidate
 
         tool_results = _extract_tool_results(agent.messages)
@@ -292,45 +346,58 @@ class StrandsAdvisor:
             if check_id == "numeric_provenance"
         ]
 
-        # Attempt one repair if numeric provenance failed on the first pass
-        if repair_count < 1 and numeric_failures:
-            repair_instructions = (
-                "数字溯源复核发现以下金额或比率没有本轮工具结果的直接依据："
-                + "；".join(numeric_failures)
-                + "。删除这些无依据数字及依赖它们的结论；只保留工具结果直接支持的金额和比率，"
-                "保持来源精度，不要自行计算、汇总、换算、取整或近似。"
-            )
-            repair_request = (
-                "请根据以下检查结果修订上一版完整回答："
-                + repair_instructions
-                + "不得调用工具，不要提及本次复核或输出检查说明。"
-            )
-            self.logger.info(json.dumps({
-                "event": "output_review_repair_requested",
-                "trace_id": trace_id,
-                "intent": intent,
-                "retry_count": 1,
-                "failed_checks": ["numeric_provenance"],
-                "reasons": numeric_failures,
-            }, ensure_ascii=False))
+        # Attempt repair if numeric provenance failed, within limits
+        if repair_count < self.MAX_REPAIR_ATTEMPTS and numeric_failures:
+            # Check time budget before repair
+            elapsed = time.time() - start_time
+            if elapsed > self.MAX_EXECUTION_TIME * 0.9:
+                self.logger.warning(json.dumps({
+                    "event": "repair_skipped_timeout",
+                    "trace_id": trace_id,
+                    "repair_count": repair_count,
+                    "elapsed_seconds": elapsed,
+                    "limit": self.MAX_EXECUTION_TIME,
+                }, ensure_ascii=False))
+            else:
+                repair_instructions = (
+                    "数字溯源复核发现以下金额或比率没有本轮工具结果的直接依据："
+                    + "；".join(numeric_failures)
+                    + "。删除这些无依据数字及依赖它们的结论；只保留工具结果直接支持的金额和比率，"
+                    "保持来源精度，不要自行计算、汇总、换算、取整或近似。"
+                )
+                repair_request = (
+                    "请根据以下检查结果修订上一版完整回答："
+                    + repair_instructions
+                    + "不得调用工具，不要提及本次复核或输出检查说明。"
+                )
+                self.logger.info(json.dumps({
+                    "event": "output_review_repair_requested",
+                    "trace_id": trace_id,
+                    "intent": intent,
+                    "retry_count": repair_count + 1,
+                    "max_attempts": self.MAX_REPAIR_ATTEMPTS,
+                    "failed_checks": ["numeric_provenance"],
+                    "reasons": numeric_failures,
+                }, ensure_ascii=False))
 
-            repair_agent = Agent(
-                model=get_model(),
-                messages=list(agent.messages),
-                tools=[],
-                system_prompt=self._build_system_prompt(intent, repair_request=repair_request),
-                callback_handler=null_callback_handler,
-            )
-            repair_result = repair_agent(repair_request)
-            repaired_candidate = _extract_text(repair_result)
-            return self._run_output_review(
-                agent=repair_agent,
-                intent=intent,
-                question=question,
-                candidate=repaired_candidate,
-                trace_id=trace_id,
-                repair_count=1,
-            )
+                repair_agent = Agent(
+                    model=get_model(),
+                    messages=list(agent.messages),
+                    tools=[],
+                    system_prompt=self._build_system_prompt(intent, repair_request=repair_request),
+                    callback_handler=null_callback_handler,
+                )
+                repair_result = repair_agent(repair_request)
+                repaired_candidate = _extract_text(repair_result)
+                return self._run_output_review(
+                    agent=repair_agent,
+                    intent=intent,
+                    question=question,
+                    candidate=repaired_candidate,
+                    trace_id=trace_id,
+                    repair_count=repair_count + 1,
+                    start_time=start_time,
+                )
 
         if notes:
             context.candidate += "\n\n" + "\n".join(

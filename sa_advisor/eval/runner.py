@@ -208,12 +208,12 @@ class EventCollector(logging.Handler):
         self.events: list[dict[str, Any]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        msg = record.getMessage()
+        msg = record.msg
         if isinstance(msg, dict):
             self.events.append(msg)
             return
         try:
-            self.events.append(json.loads(msg))
+            self.events.append(json.loads(record.getMessage()))
         except (json.JSONDecodeError, TypeError):
             pass
 
